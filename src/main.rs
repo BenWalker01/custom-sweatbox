@@ -1,10 +1,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, Level};
+use std::sync::Arc;
 
 mod server;
 mod simulator;
 mod utils;
+
+use utils::navigation::load_navigation_data;
+use utils::performance::load_performance_data;
 
 
 #[derive(Parser)]
@@ -56,7 +60,35 @@ async fn main() -> Result<()> {
             profile: _,
         } => {
             info!("Starting Simulator connecting to {}", server);
-            // TODO: Implement simulator
+            
+            // Load navigation data
+            info!("Loading navigation data...");
+            let fix_db = match load_navigation_data("_old/data") {
+                Ok(db) => {
+                    info!("Loaded {} fixes", db.len());
+                    Arc::new(db)
+                }
+                Err(e) => {
+                    eprintln!("Failed to load navigation data: {}", e);
+                    return Err(e.into());
+                }
+            };
+            
+            // Load performance data
+            info!("Loading aircraft performance data...");
+            let perf_db = match load_performance_data("_old/data/AircraftPerformace.txt") {
+                Ok(db) => {
+                    info!("Loaded performance data for {} aircraft types", db.len());
+                    Arc::new(db)
+                }
+                Err(e) => {
+                    eprintln!("Failed to load performance data: {}", e);
+                    return Err(e.into());
+                }
+            };
+            
+            // TODO: Implement simulator runner
+            info!("Databases loaded successfully");
         }
     }
 
