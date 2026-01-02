@@ -74,6 +74,9 @@ async fn handle_client(
     
     match client_type {
         Some(ClientType::Controller) => {
+            let callsign = client.read().await.callsign().to_string();
+            info!("[CONTROLLER] {} identified as controller", callsign);
+            
             let mut ctrl_list = controllers.write().await;
             ctrl_list.push(Arc::clone(&client));
             
@@ -114,6 +117,9 @@ async fn handle_client(
             ctrl_list.retain(|c| !Arc::ptr_eq(c, &client));
         }
         Some(ClientType::Pilot) => {
+            let callsign = client.read().await.callsign().to_string();
+            info!("[PILOT] {} identified as pilot", callsign);
+            
             let mut pilot_list = pilots.write().await;
             pilot_list.push(Arc::clone(&client));
             
