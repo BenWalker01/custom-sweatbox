@@ -1,6 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 use super::flight_plan::FlightPlan;
 use super::plane_mode::PlaneMode;
+use crate::utils::navigation::FixDatabase;
 
 const TURN_RATE: f64 = 2.0; // degrees per second
 const TAXI_SPEED: f64 = 15.0; // knots
@@ -61,6 +63,9 @@ pub struct Plane {
     pub vert_mode: i32, // -1: desc, 0: level, 1: climb
     pub lvl_coords: Option<(f64, f64)>,
     pub die_on_reaching_2k: bool,
+    
+    // Fix database reference
+    pub fix_db: Option<Arc<FixDatabase>>,
     
     // Time tracking
     last_time: f64,
@@ -143,8 +148,19 @@ impl Plane {
             first_ground_position: None,
             lvl_coords: None,
             die_on_reaching_2k: false,
+            fix_db: None,
             last_time: Self::get_time(),
         }
+    }
+
+    /// Set the fix database for navigation
+    pub fn set_fix_database(&mut self, fix_db: Arc<FixDatabase>) {
+        self.fix_db = Some(fix_db);
+    }
+
+    /// Get coordinates for a fix from the database
+    pub fn get_fix_coords(&self, fix_name: &str) -> Option<(f64, f64)> {
+        self.fix_db.as_ref()?.get(fix_name).copied()
     }
 
     fn get_time() -> f64 {
@@ -404,14 +420,66 @@ impl Plane {
         }
 
         let tas = self.calculate_tas();
-        let _distance_to_travel = tas * (delta_t / 3600.0);
+        let distance_to_travel = tas * (delta_t / 3600.0);
         
-        // Get next fix (simplified - would need fix database)
-        let _next_fix = &self.flight_plan.route.fixes[0];
-        // For now, we'll just use heading mode logic
-        // In full implementation, would look up fix coordinates and navigate to them
-        
-        self.update_heading_mode(delta_t);
+        // Get next fix coordinates
+        let next_fix_name = &self.flight_plan.route.fixes[0].clone();
+        let next_fix_coords = if let Some(coords) = self.get_fix_coords(next_fix_name) {
+            coords
+        } else {
+            // If fix not found, just maintain heading
+            self.update_heading_mode(delta_t);
+            return;
+        };
+
+        let distance_to_fix = Self::haversine_nm(self.lat, self.lon, next_fix_coords.0, next_fix_coords.1);
+
+        // Check if we've reached the fix
+        if distance_to_fix <= distance_to_travel {
+            // Move to the fix
+            self.lat = next_fix_coords.0;
+            self.lon = next_fix_coords.1;
+            
+            // Remove this fix from the route
+            self.flight_plan.route.remove_first_fix();
+            
+            // Check if there are more fixes
+            if self.flight_plan.route.fixes.is_empty() {
+                self.mode = PlaneMode::Heading;
+                return;
+            }
+        } else if distance_to_fix < 1.2 {
+            // Close to fix but not quite there - mark as passed
+            self.flight_plan.route.remove_first_fix();
+            
+            if self.flight_plan.route.fixes.is_empty() {
+                self.mode = PlaneMode::Heading;
+                return;
+            }
+        }
+
+        // Update target heading towards next fix
+        self.target_heading = Self::heading_from_to((self.lat, self.lon), next_fix_coords);
+
+        // Turn towards target heading
+        if self.target_heading != self.heading {
+            let angle_diff = (self.target_heading - self.heading + 360.0) % 360.0;
+            
+            if TURN_RATE * delta_t > angle_diff.min(360.0 - angle_diff) {
+                self.heading = self.target_heading;
+            } else if angle_diff < 180.0 {
+                self.heading += TURN_RATE * delta_t;
+            } else {
+                self.heading -= TURN_RATE * delta_t;
+            }
+
+            self.heading = (self.heading + 360.0) % 360.0;
+        }
+
+        // Move forward
+        let (delta_lat, delta_lon) = self.delta_lat_lon(tas, self.heading, delta_t);
+        self.lat += delta_lat;
+        self.lon += delta_lon;
     }
 
     fn update_ground_taxi(&mut self, delta_t: f64) {
@@ -433,7 +501,7 @@ impl Plane {
     /// Create a plane at a specific fix
     pub fn from_fix(
         callsign: String,
-        _fix: String,
+        fix: String,
         squawk: u32,
         altitude: f64,
         heading: f64,
@@ -442,11 +510,16 @@ impl Plane {
         flight_plan: FlightPlan,
         currently_with_data: Option<ControllerData>,
         first_controller: Option<String>,
+        fix_db: Option<Arc<FixDatabase>>,
     ) -> Self {
-        // For now, using placeholder coordinates
-        let (lat, lon) = (51.15487, -0.16454);
+        // Try to get fix coordinates from database, fallback to default
+        let (lat, lon) = if let Some(ref db) = fix_db {
+            db.get(&fix).copied().unwrap_or((51.15487, -0.16454))
+        } else {
+            (51.15487, -0.16454)
+        };
         
-        Self::new(
+        let mut plane = Self::new(
             callsign,
             squawk,
             altitude,
@@ -460,14 +533,20 @@ impl Plane {
             currently_with_data,
             first_controller,
             None,
-        )
+        );
+        
+        if let Some(db) = fix_db {
+            plane.set_fix_database(db);
+        }
+        
+        plane
     }
 
     /// Create a plane before a fix (20nm before)
     pub fn before_fix(
         callsign: String,
-        _fix1: String,
-        _fix2: String,
+        fix1: String,
+        fix2: String,
         squawk: u32,
         altitude: f64,
         heading: f64,
@@ -476,11 +555,28 @@ impl Plane {
         flight_plan: FlightPlan,
         currently_with_data: Option<ControllerData>,
         first_controller: Option<String>,
+        fix_db: Option<Arc<FixDatabase>>,
     ) -> Self {
-        // In full implementation, would calculate position 20nm before fix1
-        let (lat, lon) = (51.15487, -0.16454);
+        // Try to calculate position 20nm before fix1 towards fix2
+        let (lat, lon) = if let Some(ref db) = fix_db {
+            if let (Some(coords1), Some(coords2)) = (db.get(&fix1), db.get(&fix2)) {
+                let dist = Self::haversine_nm(coords1.0, coords1.1, coords2.0, coords2.1);
+                if dist > 0.0 {
+                    let fraction = -20.0 / dist; // 20nm before fix1
+                    let lat = coords1.0 + fraction * (coords2.0 - coords1.0);
+                    let lon = coords1.1 + fraction * (coords2.1 - coords1.1);
+                    (lat, lon)
+                } else {
+                    *coords1
+                }
+            } else {
+                (51.15487, -0.16454)
+            }
+        } else {
+            (51.15487, -0.16454)
+        };
         
-        Self::new(
+        let mut plane = Self::new(
             callsign,
             squawk,
             altitude,
@@ -494,7 +590,13 @@ impl Plane {
             currently_with_data,
             first_controller,
             None,
-        )
+        );
+        
+        if let Some(db) = fix_db {
+            plane.set_fix_database(db);
+        }
+        
+        plane
     }
 
     /// Create a plane at a ground point

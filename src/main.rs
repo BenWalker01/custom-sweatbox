@@ -4,6 +4,7 @@ use tracing::{info, Level};
 
 mod server;
 mod simulator;
+mod utils;
 
 
 #[derive(Parser)]
