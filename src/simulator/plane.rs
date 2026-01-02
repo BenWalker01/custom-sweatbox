@@ -3,13 +3,13 @@ use std::sync::Arc;
 use super::flight_plan::FlightPlan;
 use super::plane_mode::PlaneMode;
 use crate::utils::navigation::FixDatabase;
+use crate::utils::performance::{PerformanceDatabase, AircraftPerformance};
 
 const TURN_RATE: f64 = 2.0; // degrees per second
 const TAXI_SPEED: f64 = 15.0; // knots
 const PUSH_SPEED: f64 = 5.0; // knots
-const CLIMB_RATE: f64 = 2500.0; // feet per minute
-const DESCENT_RATE: f64 = -2000.0; // feet per minute
-const HIGH_DESCENT_RATE: f64 = -3000.0; // feet per minute
+const DEFAULT_CLIMB_RATE: f64 = 2500.0; // feet per minute (fallback)
+const DEFAULT_DESCENT_RATE: f64 = -2000.0; // feet per minute (fallback)
 
 #[derive(Debug, Clone)]
 pub struct Plane {
@@ -66,6 +66,9 @@ pub struct Plane {
     
     // Fix database reference
     pub fix_db: Option<Arc<FixDatabase>>,
+    
+    // Performance database reference
+    pub perf_db: Option<Arc<PerformanceDatabase>>,
     
     // Time tracking
     last_time: f64,
@@ -149,6 +152,7 @@ impl Plane {
             lvl_coords: None,
             die_on_reaching_2k: false,
             fix_db: None,
+            perf_db: None,
             last_time: Self::get_time(),
         }
     }
@@ -156,6 +160,11 @@ impl Plane {
     /// Set the fix database for navigation
     pub fn set_fix_database(&mut self, fix_db: Arc<FixDatabase>) {
         self.fix_db = Some(fix_db);
+    }
+
+    /// Set the performance database for realistic climb/descent
+    pub fn set_performance_database(&mut self, perf_db: Arc<PerformanceDatabase>) {
+        self.perf_db = Some(perf_db);
     }
 
     /// Get coordinates for a fix from the database
@@ -286,12 +295,32 @@ impl Plane {
             0 // Level
         };
 
-        // Set vertical speed based on mode
+        // Set vertical speed based on mode and aircraft performance
         if self.vert_mode == 1 {
-            self.vert_speed = CLIMB_RATE;
+            self.vert_speed = self.get_climb_rate();
         } else if self.vert_mode == -1 {
-            self.vert_speed = DESCENT_RATE;
+            self.vert_speed = self.get_descent_rate();
         }
+    }
+
+    /// Get the appropriate climb rate for current altitude
+    fn get_climb_rate(&self) -> f64 {
+        if let Some(ref perf_db) = self.perf_db {
+            if let Some(perf) = perf_db.get(&self.aircraft_type) {
+                return perf.get_rate_of_climb(self.altitude) as f64;
+            }
+        }
+        DEFAULT_CLIMB_RATE
+    }
+
+    /// Get the appropriate descent rate for current altitude
+    fn get_descent_rate(&self) -> f64 {
+        if let Some(ref perf_db) = self.perf_db {
+            if let Some(perf) = perf_db.get(&self.aircraft_type) {
+                return perf.get_rate_of_descent(self.altitude) as f64;
+            }
+        }
+        DEFAULT_DESCENT_RATE
     }
 
     fn update_speed(&mut self, delta_t: f64) {
