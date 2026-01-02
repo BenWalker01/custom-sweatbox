@@ -41,8 +41,8 @@ impl PilotHandler {
             return 0;
         }
 
-        // Pilot login (#AP)
-        if parts[0].starts_with("#AP") {
+        // Pilot login (#AA with 8 parameters)
+        if parts[0].starts_with("#AA") && parts.len() < 12 {
             self.callsign = parts[0][3..].to_string();
             if parts.len() > 1 { self.server = parts[1].to_string(); }
             if parts.len() > 2 { self.cid = parts[2].to_string(); }
@@ -52,7 +52,7 @@ impl PilotHandler {
             return 0;
         }
 
-        // Squawk assignment (@N)
+        // Position update (@N)
         if parts[0].starts_with("@N") {
             if parts.len() > 2 {
                 self.squawk = parts[2].to_string();

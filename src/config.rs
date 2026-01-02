@@ -162,6 +162,25 @@ impl Default for FleetConfig {
         airports.insert("EGLC".to_string(), vec![
             "BAW".to_string(), "KLM".to_string()
         ]);
+        // Add foreign origin airports for transits
+        airports.insert("EHAM".to_string(), vec![
+            "KLM".to_string(), "BAW".to_string(), "EZY".to_string()
+        ]);
+        airports.insert("EBBR".to_string(), vec![
+            "BAW".to_string(), "DLH".to_string()
+        ]);
+        airports.insert("EKYT".to_string(), vec![
+            "BAW".to_string(), "EZY".to_string()
+        ]);
+        airports.insert("EGCC".to_string(), vec![
+            "BAW".to_string(), "RYR".to_string(), "EZY".to_string()
+        ]);
+        airports.insert("ESSA".to_string(), vec![
+            "BAW".to_string(), "KLM".to_string()
+        ]);
+        airports.insert("EDDF".to_string(), vec![
+            "DLH".to_string(), "BAW".to_string()
+        ]);
 
         Self {
             airlines,

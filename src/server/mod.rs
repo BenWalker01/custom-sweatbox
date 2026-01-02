@@ -106,8 +106,9 @@ async fn handle_client(
                         broadcast_to_controllers(&msg, &client, &controllers).await;
                     }
                     2 => {
-                        // Forward to all controllers
+                        // Forward to all controllers and all pilots
                         broadcast_to_all_controllers(&msg, &controllers).await;
+                        broadcast_to_all_pilots(&msg, &pilots).await;
                     }
                     _ => {}
                 }
@@ -188,6 +189,17 @@ async fn broadcast_to_all_controllers(msg: &str, controllers: &ClientList) {
     for controller in ctrl_list.iter() {
         let callsign = controller.read().await.callsign().to_string();
         if let Err(e) = controller.write().await.send_message(msg).await {
+            error!("[ERROR] Failed to send message to {}: {}", callsign, e);
+        }
+    }
+}
+
+async fn broadcast_to_all_pilots(msg: &str, pilots: &ClientList) {
+    let pilot_list = pilots.read().await;
+    
+    for pilot in pilot_list.iter() {
+        let callsign = pilot.read().await.callsign().to_string();
+        if let Err(e) = pilot.write().await.send_message(msg).await {
             error!("[ERROR] Failed to send message to {}: {}", callsign, e);
         }
     }

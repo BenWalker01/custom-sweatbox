@@ -10,17 +10,17 @@
     "masterController": "LON_E_CTR",
     "masterControllerFreq": "18480",
     "otherControllers": [
-        {"callsign": "LON_M_CTR", "frequency": "20025"},
-        {"callsign": "LON_D_CTR", "frequency": "34905"},
-        {"callsign": "LON_NW_CTR", "frequency": "35580"},
-        {"callsign": "LON_NE_CTR", "frequency": "28130"},
-        {"callsign": "LTC_M_CTR", "frequency": "21030"},
-        {"callsign": "LTC_NE_CTR", "frequency": "18825"},
-        {"callsign": "LTC_NW_CTR", "frequency": "21280"},
-        {"callsign": "LTC_SE_CTR", "frequency": "20530"},
-        {"callsign": "EGLL_N_APP", "frequency": "19730"},
-        {"callsign": "EGKK_APP", "frequency": "26825"},
-        {"callsign": "EGLC_APP", "frequency": "32255"}
+        ["LON_M_CTR", "20025"],
+        ["LON_D_CTR", "34905"],
+        ["LON_NW_CTR", "35580"],
+        ["LON_NE_CTR", "28130"],
+        ["LTC_M_CTR", "21030"],
+        ["LTC_NE_CTR", "18825"],
+        ["LTC_NW_CTR", "21280"],
+        ["LTC_SE_CTR", "20530"],
+        ["EGLL_N_APP", "19730"],
+        ["EGKK_APP", "26825"],
+        ["EGLC_APP", "32255"]
     ],
     "stdDepartures": [
         {

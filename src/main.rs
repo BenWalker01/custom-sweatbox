@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             
             // Load navigation data
             info!("Loading navigation data...");
-            let fix_db = match load_navigation_data("_old/data") {
+            let fix_db = match load_navigation_data("data") {
                 Ok(db) => {
                     info!("Loaded {} fixes", db.len());
                     Arc::new(db)
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
             
             // Load performance data
             info!("Loading aircraft performance data...");
-            let perf_db = match load_performance_data("_old/data/AircraftPerformace.txt") {
+            let perf_db = match load_performance_data("data/AircraftPerformace.txt") {
                 Ok(db) => {
                     info!("Loaded performance data for {} aircraft types", db.len());
                     Arc::new(db)
@@ -102,16 +102,19 @@ async fn main() -> Result<()> {
             let fleet_config = FleetConfig::default();
 
             // Create and run simulation
-            let mut runner = SimulationRunner::new(
+            let runner = SimulationRunner::new(
                 profile_config,
                 sim_config,
                 fleet_config,
                 fix_db,
                 perf_db,
+                server.clone(),
             );
 
+            let runner = Arc::new(tokio::sync::RwLock::new(runner));
+
             info!("Starting simulation...");
-            runner.run().await;
+            SimulationRunner::run(runner).await;
         }
     }
 

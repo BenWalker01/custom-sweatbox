@@ -30,23 +30,30 @@ impl ClientHandler {
     pub async fn run(&mut self) -> Result<()> {
         if let Some(msg) = self.receive_message().await? {
             if msg.contains("#AA") {
-                // Controller login
-                let mut controller = ControllerHandler::new();
-                controller.handle(&msg);
+                // Both controllers and pilots use #AA, distinguish by parameter count
+                let parts: Vec<&str> = msg.split(':').collect();
                 
-                let response = FsdMessage::encode(&[
-                    "#TMserver",
-                    &controller.callsign,
-                    "Custom FSD Server"
-                ]);
-                self.send_message(&response).await?;
-                
-                self.handler = Some(HandlerType::Controller(controller));
-            } else if msg.contains("#AP") {
-                // Pilot login
-                let mut pilot = PilotHandler::new();
-                pilot.handle(&msg);
-                self.handler = Some(HandlerType::Pilot(pilot));
+                // Controller: #AA + callsign + 10 more params (12 total)
+                // Pilot: #AA + callsign + 7 more params (9 total)
+                if parts.len() >= 12 {
+                    // Controller login
+                    let mut controller = ControllerHandler::new();
+                    controller.handle(&msg);
+                    
+                    let response = FsdMessage::encode(&[
+                        "#TMserver",
+                        &controller.callsign,
+                        "Custom FSD Server"
+                    ]);
+                    self.send_message(&response).await?;
+                    
+                    self.handler = Some(HandlerType::Controller(controller));
+                } else {
+                    // Pilot login
+                    let mut pilot = PilotHandler::new();
+                    pilot.handle(&msg);
+                    self.handler = Some(HandlerType::Pilot(pilot));
+                }
             }
         }
         

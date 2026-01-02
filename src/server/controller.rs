@@ -67,18 +67,35 @@ impl ControllerHandler {
             if parts.len() > 2 {
                 match parts[2] {
                     "IP" => {
-                        // This should send a response, but we can't do that here
-                        // The caller will need to handle this
+                        // IP query - don't forward
                         return 0;
                     }
-                    "FP" => {
-                        // Flight plan query - caller needs to handle
-                        return 0;
+                    "FP" | "WH" | "CAPS" => {
+                        // Flight plan query, who has, capabilities - forward to all (pilots and controllers)
+                        return 2;
                     }
-                    _ => return 1,
+                    "IT" | "TA" | "BC" | "HT" => {
+                        // Initiate track, temp altitude, beacon code, handoff - forward to all
+                        return 2;
+                    }
+                    "SC" | "DR" => {
+                        // Scratch pad, delete route - forward to all
+                        return 2;
+                    }
+                    _ => return 2, // Default: forward to all
                 }
             }
-            return 1;
+            return 2;
+        }
+
+        // Handoff messages ($HO)
+        if parts[0].starts_with("$HO") {
+            return 2; // Forward to all controllers and pilots
+        }
+
+        // Accept handoff ($HA)
+        if parts[0].starts_with("$HA") {
+            return 2; // Forward to all controllers and pilots
         }
 
         // Default: forward to other controllers

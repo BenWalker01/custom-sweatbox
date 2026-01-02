@@ -1,4 +1,5 @@
 use crate::utils::procedures::{load_procedures, ProcedureDatabase};
+use crate::utils::navigation::FixDatabase;
 
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -31,22 +32,7 @@ impl Route {
             .map(|s| s.to_string())
             .collect();
 
-        // Handle SID parsing (e.g., "BPK5K/09L")
-        if self.dep_ad.starts_with("EG") && !fix_airways.is_empty() {
-            if let Some(sid_fixes) = self.expand_sid(&fix_airways[0]) {
-                fix_airways[0] = sid_fixes;
-            }
-        }
-
-        // Handle STAR parsing (e.g., "ALESO1H/27R")
-        if let Some(ref arr_ad) = self.arr_ad {
-            if arr_ad.starts_with("EG") && !fix_airways.is_empty() {
-                let last_idx = fix_airways.len() - 1;
-                if let Some(star_fixes) = self.expand_star(&fix_airways[last_idx]) {
-                    fix_airways[last_idx] = star_fixes;
-                }
-            }
-        }
+        // SID and STAR expansion is now done externally via expand_sid() and expand_star()
 
         let mut prev_wpt: Option<String> = None;
         let mut prev_route: Option<String> = None;
@@ -100,8 +86,13 @@ impl Route {
     }
 
     /// Expand SID if route starts with "SIDNAME/RUNWAY" format
-    /// Returns the expanded fix string if SID found, None otherwise
-    fn expand_sid(&self, first_item: &str) -> Option<String> {
+    pub fn expand_sid(&mut self, _airport: &str, _runway: &str, _fix_db: &FixDatabase) -> Result<(), String> {
+        if self.fixes.is_empty() {
+            return Ok(());
+        }
+        
+        let first_item = &self.fixes[0].clone();
+        
         // Check for SID format: SIDNAME/RUNWAY (e.g., "BPK5K/09L")
         if let Some(slash_idx) = first_item.find('/') {
             let sid_name = &first_item[..slash_idx];
@@ -113,39 +104,63 @@ impl Route {
                     if let Some(fixes) = sid_runways.get(runway) {
                         println!("Expanded SID {} for runway {} at {}: {}", 
                                  sid_name, runway, self.dep_ad, fixes);
-                        return Some(fixes.clone());
+                        
+                        // Replace first item with expanded fixes
+                        let expanded: Vec<String> = fixes.split_whitespace()
+                            .map(|s| s.to_string())
+                            .collect();
+                        self.fixes.remove(0);
+                        self.fixes.splice(0..0, expanded);
+                        
+                        return Ok(());
                     }
                 }
             }
+            return Err(format!("SID {} not found for runway {}", sid_name, runway));
         }
-        None
+        Ok(())
     }
 
     /// Expand STAR if route ends with "STARNAME/RUNWAY" format
-    /// Returns the expanded fix string if STAR found, None otherwise
-    fn expand_star(&self, last_item: &str) -> Option<String> {
+    pub fn expand_star(&mut self, _airport: &str, _runway: &str, _fix_db: &FixDatabase) -> Result<(), String> {
+        if self.fixes.is_empty() {
+            return Ok(());
+        }
+        
+        let last_idx = self.fixes.len() - 1;
+        let last_item = &self.fixes[last_idx].clone();
+        
         // Check for STAR format: STARNAME/RUNWAY (e.g., "ALESO1H/27R")
         if let Some(slash_idx) = last_item.find('/') {
             let star_name = &last_item[..slash_idx];
             let runway = &last_item[slash_idx + 1..];
 
-            if let Some(ref arr_ad) = self.arr_ad {
-                // Load STAR data for arrival airport
+            // Load STAR data for arrival airport
+            if let Some(arr_ad) = &self.arr_ad {
                 if let Ok((_, stars)) = load_procedures("data", arr_ad) {
                     if let Some(star_runways) = stars.get(star_name) {
                         if let Some(fixes) = star_runways.get(runway) {
-                            println!("Expanded STAR {} for runway {} at {}: {}", 
+                            println!("Expanded STAR {} for runway {} at {}: {}",
                                      star_name, runway, arr_ad, fixes);
-                            return Some(fixes.clone());
+                            
+                            // Replace last item with expanded fixes
+                            let expanded: Vec<String> = fixes.split_whitespace()
+                                .map(|s| s.to_string())
+                                .collect();
+                            self.fixes.remove(last_idx);
+                            self.fixes.extend(expanded);
+                            
+                            return Ok(());
                         }
                     }
                 }
+                return Err(format!("STAR {} not found for runway {}", star_name, runway));
             }
         }
-        None
+        Ok(())
     }
 
-    fn expand_airway(&mut self, from_fix: &str, to_fix: &str, _airway: &str) {
+    fn expand_airway(&mut self, _from_fix: &str, _to_fix: &str, _airway: &str) {
         // TODO: Load ATS route data and expand intermediate fixes
         // For now, this is a placeholder that just connects the two fixes
         // In full implementation:
