@@ -1,4 +1,27 @@
 {
+    "activeAerodromes": ["EGSS", "EGGW", "EGLC", "EGLL"],
+    "activeRunways": {
+        "EGSS": "22",
+        "EGGW": "25",
+        "EGLC": "27",
+        "EGLL": "27R"
+    },
+    "activeControllers": ["LTC_E_CTR", "LTC_N_CTR", "ESSEX_APP", "EGSS_APP", "EGGW_APP"],
+    "masterController": "LON_E_CTR",
+    "masterControllerFreq": "18480",
+    "otherControllers": [
+        {"callsign": "LON_M_CTR", "frequency": "20025"},
+        {"callsign": "LON_D_CTR", "frequency": "34905"},
+        {"callsign": "LON_NW_CTR", "frequency": "35580"},
+        {"callsign": "LON_NE_CTR", "frequency": "28130"},
+        {"callsign": "LTC_M_CTR", "frequency": "21030"},
+        {"callsign": "LTC_NE_CTR", "frequency": "18825"},
+        {"callsign": "LTC_NW_CTR", "frequency": "21280"},
+        {"callsign": "LTC_SE_CTR", "frequency": "20530"},
+        {"callsign": "EGLL_N_APP", "frequency": "19730"},
+        {"callsign": "EGKK_APP", "frequency": "26825"},
+        {"callsign": "EGLC_APP", "frequency": "32255"}
+    ],
     "stdDepartures": [
         {
             "departing": "EGSS",

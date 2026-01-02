@@ -25,14 +25,14 @@ impl PlaneMode {
 }
 
 impl fmt::Display for PlaneMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            PlaneMode::FlightPlan => write!(f, "FLIGHTPLAN"),
-            PlaneMode::Heading => write!(f, "HEADING"),
+            PlaneMode::FlightPlan => write!(f, "FP"),
+            PlaneMode::Heading => write!(f, "HDG"),
             PlaneMode::ILS => write!(f, "ILS"),
-            PlaneMode::GroundStationary => write!(f, "GROUND_STATIONARY"),
-            PlaneMode::GroundTaxi => write!(f, "GROUND_TAXI"),
-            PlaneMode::GroundReady => write!(f, "GROUND_READY"),
+            PlaneMode::GroundStationary => write!(f, "GND_STAT"),
+            PlaneMode::GroundTaxi => write!(f, "TAXI"),
+            PlaneMode::GroundReady => write!(f, "RDY"),
             PlaneMode::None => write!(f, "NONE"),
         }
     }

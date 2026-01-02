@@ -6,9 +6,12 @@ use std::sync::Arc;
 mod server;
 mod simulator;
 mod utils;
+mod config;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
+use config::{ProfileConfig, SimulationConfig, FleetConfig};
+use simulator::SimulationRunner;
 
 
 #[derive(Parser)]
@@ -57,7 +60,7 @@ async fn main() -> Result<()> {
 
         Commands::Simulator {
             server,
-            profile: _,
+            profile,
         } => {
             info!("Starting Simulator connecting to {}", server);
             
@@ -87,8 +90,28 @@ async fn main() -> Result<()> {
                 }
             };
             
-            // TODO: Implement simulator runner
-            info!("Databases loaded successfully");
+            // Load profile
+            let profile_path = profile.unwrap_or_else(|| "profiles/TCE + TCNE.json".to_string());
+            info!("Loading simulation profile: {}", profile_path);
+            let profile_config = ProfileConfig::load(&profile_path)?;
+            info!("  ✓ {} departure configs", profile_config.std_departures.len());
+            info!("  ✓ {} transit configs", profile_config.std_transits.len());
+
+            // Create configuration
+            let sim_config = SimulationConfig::default();
+            let fleet_config = FleetConfig::default();
+
+            // Create and run simulation
+            let mut runner = SimulationRunner::new(
+                profile_config,
+                sim_config,
+                fleet_config,
+                fix_db,
+                perf_db,
+            );
+
+            info!("Starting simulation...");
+            runner.run().await;
         }
     }
 
