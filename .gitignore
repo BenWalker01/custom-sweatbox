@@ -1,0 +1,29 @@
+# Rust target directory
+/target
+
+_old/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.old
+
+# Log files
+*.log
+
+# Test output
+*.profraw
+*.profdata
+
+# Build artifacts
+flycheck*/
