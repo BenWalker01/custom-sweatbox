@@ -2,6 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, Level};
 
+mod server;
+
 
 #[derive(Parser)]
 #[command(name = "custom-sweatbox")]
@@ -42,14 +44,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Server { port, host } => {
-            info!("Starting FSD Server");
+            info!("Starting FSD Server on {}:{}", host, port);
+            let fsd_server = server::FsdServer::new();
+            fsd_server.start().await?;
         }
 
         Commands::Simulator {
             server,
-            profile,
+            profile: _,
         } => {
-            info!("Starting Simulator");
+            info!("Starting Simulator connecting to {}", server);
+            // TODO: Implement simulator
         }
     }
 
