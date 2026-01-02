@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing::{info, Level};
 
 mod server;
+mod simulator;
 
 
 #[derive(Parser)]
