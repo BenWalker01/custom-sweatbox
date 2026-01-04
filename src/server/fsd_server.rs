@@ -113,9 +113,14 @@ impl FsdServer {
                                     let stream_arc = Arc::new(Mutex::new(write_half));
                                     let handler = Arc::new(Mutex::new(ControllerHandler::new(stream_arc)));
                                     controllers.lock().await.push(handler.clone());
-                                    controller_handler = Some(handler);
+                                    controller_handler = Some(handler.clone());
                                     handler_type = Some(ClientType::Controller);
                                     read_stream = Some(read_half);
+                                    
+                                    // Process the login message to get callsign
+                                    let _ = handler.lock().await.handle(message);
+                                    let callsign = handler.lock().await.callsign().to_string();
+                                    info!("[CONTROLLER LOGIN] {} from {}", callsign, addr);
                                 }
                             } else if message.contains("AP") {
                                 // Pilot login
@@ -124,11 +129,21 @@ impl FsdServer {
                                     let stream_arc = Arc::new(Mutex::new(write_half));
                                     let handler = Arc::new(Mutex::new(PilotHandler::new(stream_arc)));
                                     pilots.lock().await.push(handler.clone());
-                                    pilot_handler = Some(handler);
+                                    pilot_handler = Some(handler.clone());
                                     handler_type = Some(ClientType::Pilot);
                                     read_stream = Some(read_half);
+                                    
+                                    // Process the login message to get callsign
+                                    let _ = handler.lock().await.handle(message);
+                                    let callsign = handler.lock().await.callsign().to_string();
+                                    info!("[PILOT LOGIN] {} from {}", callsign, addr);
                                 }
                             }
+                        }
+
+                        // Skip if this was the first message (already handled during login)
+                        if first_message {
+                            continue;
                         }
 
                         // Handle message based on client type

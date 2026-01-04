@@ -73,7 +73,7 @@ impl MessageHandler for ControllerHandler {
                     let msg_parts = vec![
                         "#TMserver",
                         &callsign,
-                        "Vatsim UK FSD Server",
+                        "Custom FSD server",
                     ];
                     let data = es_convert(&msg_parts);
                     if let Ok(_) = stream.lock().await.try_write(&data) {
