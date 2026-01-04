@@ -4,14 +4,12 @@ use tracing::{info, Level};
 use std::sync::Arc;
 
 mod server;
-mod simulator;
 mod utils;
 mod config;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
 use config::{ProfileConfig, SimulationConfig, FleetConfig};
-use simulator::SimulationRunner;
 
 
 #[derive(Parser)]
@@ -54,7 +52,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Server { port, host } => {
             info!("Starting FSD Server on {}:{}", host, port);
-            let fsd_server = server::FsdServer::new();
+            let fsd_server = server::FsdServer::new(host, port);
             fsd_server.start().await?;
         }
 
@@ -102,19 +100,9 @@ async fn main() -> Result<()> {
             let fleet_config = FleetConfig::default();
 
             // Create and run simulation
-            let runner = SimulationRunner::new(
-                profile_config,
-                sim_config,
-                fleet_config,
-                fix_db,
-                perf_db,
-                server.clone(),
-            );
 
-            let runner = Arc::new(tokio::sync::RwLock::new(runner));
 
             info!("Starting simulation...");
-            SimulationRunner::run(runner).await;
         }
     }
 
