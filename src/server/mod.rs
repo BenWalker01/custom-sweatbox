@@ -94,6 +94,8 @@ async fn handle_client(
                     }
                 };
                 
+                info!("[CONTROLLER->SERVER] {} sent: {}", callsign, msg.trim());
+                
                 let forward_mode = {
                     let mut c = client.write().await;
                     c.handle_message(&msg).await
@@ -138,6 +140,8 @@ async fn handle_client(
                     }
                 };
                 
+                info!("[PILOT->SERVER] {} sent: {}", callsign, msg.trim());
+                
                 let forward_mode = {
                     let mut c = client.write().await;
                     c.handle_message(&msg).await
@@ -173,6 +177,8 @@ async fn broadcast_to_controllers(
     let sender_callsign = sender.read().await.callsign().to_string();
     let ctrl_list = controllers.read().await;
     
+    info!("[FORWARD->CONTROLLERS] {}", msg.trim());
+    
     for controller in ctrl_list.iter() {
         let callsign = controller.read().await.callsign().to_string();
         if callsign != sender_callsign {
@@ -186,6 +192,8 @@ async fn broadcast_to_controllers(
 async fn broadcast_to_all_controllers(msg: &str, controllers: &ClientList) {
     let ctrl_list = controllers.read().await;
     
+    info!("[FORWARD->ALL_CONTROLLERS] {}", msg.trim());
+    
     for controller in ctrl_list.iter() {
         let callsign = controller.read().await.callsign().to_string();
         if let Err(e) = controller.write().await.send_message(msg).await {
@@ -196,6 +204,8 @@ async fn broadcast_to_all_controllers(msg: &str, controllers: &ClientList) {
 
 async fn broadcast_to_all_pilots(msg: &str, pilots: &ClientList) {
     let pilot_list = pilots.read().await;
+    
+    info!("[FORWARD->ALL_PILOTS] {}", msg.trim());
     
     for pilot in pilot_list.iter() {
         let callsign = pilot.read().await.callsign().to_string();

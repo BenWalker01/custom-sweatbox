@@ -28,7 +28,9 @@ impl ClientHandler {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        tracing::info!("[CLIENT] Starting client handler, reading initial message...");
         if let Some(msg) = self.receive_message().await? {
+            tracing::info!("[CLIENT] Received login message: {}", msg.trim());
             if msg.contains("#AA") {
                 // Both controllers and pilots use #AA, distinguish by parameter count
                 let parts: Vec<&str> = msg.split(':').collect();
@@ -57,6 +59,7 @@ impl ClientHandler {
             }
         }
         
+        tracing::info!("[CLIENT] Client handler initialization complete, buffer has {} bytes remaining", self.buffer.len());
         Ok(())
     }
 
@@ -66,15 +69,22 @@ impl ClientHandler {
             if let Some(pos) = self.find_message_end() {
                 let msg_bytes = self.buffer.drain(..pos + 2).collect::<Vec<u8>>();
                 let msg = String::from_utf8_lossy(&msg_bytes[..msg_bytes.len() - 2]).to_string();
+                tracing::debug!("[RECV] Extracted message from buffer: {} ({} bytes remaining)", msg.trim(), self.buffer.len());
                 return Ok(Some(msg));
             }
+
+            tracing::debug!("[RECV] No complete message in buffer ({} bytes), reading from socket...", self.buffer.len());
 
             // Read more data
             let mut temp_buf = vec![0u8; 262144];
             
             match self.socket.read(&mut temp_buf).await {
-                Ok(0) => return Ok(None), // Connection closed
+                Ok(0) => {
+                    tracing::debug!("[RECV] Connection closed");
+                    return Ok(None); // Connection closed
+                }
                 Ok(n) => {
+                    tracing::debug!("[RECV] Read {} bytes from socket", n);
                     self.buffer.extend_from_slice(&temp_buf[..n]);
                     // Continue loop to check for complete message
                 }
