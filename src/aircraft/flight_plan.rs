@@ -38,19 +38,22 @@ impl FlightPlan {
     }
 
     /// Format as FSD flight plan string
+    /// Format: *A:RULES:ACFT/EQUIP:TAS:DEP:DEPTIME:ACTUALTIME:ALT:DEST:HRS:MINS:ENDURANCE_HRS:ENDURANCE_MINS:ALT_AIRPORT:REMARKS:ROUTE
     pub fn to_fsd_string(&self) -> String {
         format!(
-            "{}:I:{}:{}:{}:{}:{}:{}:{}:{}:{}:0:0",
+            "*A:I:{}/H-S/C:{}:{}:0:0:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.aircraft_type,
             self.cruise_speed,
             self.departure,
             self.cruise_altitude,
             self.arrival,
-            self.alternate,
-            self.route,
-            self.remarks,
             self.fuel_hours,
-            self.fuel_minutes
+            self.fuel_minutes,
+            self.fuel_hours,
+            self.fuel_minutes,
+            self.alternate,
+            self.remarks,
+            self.route
         )
     }
 }

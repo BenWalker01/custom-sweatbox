@@ -285,8 +285,11 @@ impl Simulator {
               callsign, aircraft.aircraft_type, departure, arrival, 
               aircraft.current_fix().unwrap_or("route"));
         
-        // Login pilot to FSD server
-        self.login_pilot(&callsign, &aircraft_type, &squawk).await?;
+        // Get flight plan before moving aircraft
+        let flight_plan_str = aircraft.flight_plan.to_fsd_string();
+        
+        // Login pilot to FSD server and send flight plan
+        self.login_pilot(&callsign, &aircraft_type, &squawk, &flight_plan_str).await?;
         
         self.aircraft.push(aircraft);
         
@@ -294,12 +297,15 @@ impl Simulator {
     }
     
     /// Login a pilot client to the FSD server
-    async fn login_pilot(&mut self, callsign: &str, aircraft_type: &str, squawk: &str) -> Result<()> {
+    async fn login_pilot(&mut self, callsign: &str, aircraft_type: &str, squawk: &str, flight_plan: &str) -> Result<()> {
         let mut pilot = AiPilot::new(callsign.to_string());
         pilot.connect(&self.server_addr).await?;
         pilot.login(aircraft_type, squawk).await?;
         
-        info!("[SIMULATOR] Pilot {} logged in to FSD server", callsign);
+        // Send flight plan
+        pilot.send_flight_plan(flight_plan).await?;
+        
+        info!("[SIMULATOR] Pilot {} logged in to FSD server and filed flight plan", callsign);
         
         self.pilot_clients.insert(callsign.to_string(), pilot);
         Ok(())
