@@ -126,7 +126,7 @@ impl Simulator {
     }
 
     /// Start the main simulation loop
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self, shutdown: tokio::sync::broadcast::Receiver<()>) -> Result<()> {
         info!("[SIMULATOR] Starting main simulation loop...");
         self.running = true;
         
@@ -139,29 +139,33 @@ impl Simulator {
         let mut update_interval = interval(Duration::from_millis(radar_update_ms));
         
         let mut loop_count = 0u64;
+        let mut shutdown_rx = shutdown;
         
-        while self.running {
-            update_interval.tick().await;
-            loop_count += 1;
-            
-            // Check departure timers
-            self.check_departure_spawns(&mut departure_timers, loop_count).await?;
-            
-            // Check transit timers
-            self.check_transit_spawns(&mut transit_timers, loop_count).await?;
-            
-            // Update all aircraft positions
-            if loop_count % 10 == 0 {
-                debug!("[SIMULATOR] Loop {}: {} controllers active", 
-                       loop_count, self.ai_controllers.len());
-            }
-            
-            // Allow graceful shutdown
-            if loop_count % 100 == 0 {
-                // Check for shutdown signal here if needed
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!("[SIMULATOR] Shutdown signal received");
+                    break;
+                }
+                _ = update_interval.tick() => {
+                    loop_count += 1;
+                    
+                    // Check departure timers
+                    self.check_departure_spawns(&mut departure_timers, loop_count).await?;
+                    
+                    // Check transit timers
+                    self.check_transit_spawns(&mut transit_timers, loop_count).await?;
+                    
+                    // Update all aircraft positions
+                    if loop_count % 10 == 0 {
+                        debug!("[SIMULATOR] Loop {}: {} controllers active", 
+                               loop_count, self.ai_controllers.len());
+                    }
+                }
             }
         }
         
+        self.running = false;
         info!("[SIMULATOR] Simulation loop stopped");
         Ok(())
     }

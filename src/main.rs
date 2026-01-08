@@ -121,36 +121,20 @@ async fn main() -> Result<()> {
             
             info!("Starting simulation...");
             
-            // Setup Ctrl+C handler
-            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let r = running.clone();
+            // Create shutdown channel
+            let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
             
+            // Setup Ctrl+C handler
             ctrlc::set_handler(move || {
                 info!("Received Ctrl+C, stopping simulation...");
-                r.store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = shutdown_tx.send(());
             }).expect("Error setting Ctrl-C handler");
             
             // Run simulation loop
-            let sim_handle = tokio::spawn(async move {
-                if let Err(e) = simulator.run().await {
-                    error!("Simulation error: {}", e);
-                }
-                simulator
-            });
-            
-            // Wait for shutdown signal
-            while running.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
+            simulator.run(shutdown_rx).await?;
             
             // Stop simulation
-            if !sim_handle.is_finished() {
-                info!("Stopping simulation...");
-                // The simulator will stop on next loop iteration
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            
-            let mut simulator = sim_handle.await?;
+            info!("Stopping simulation...");
             simulator.stop().await?;
             
             info!("Simulation stopped cleanly");
