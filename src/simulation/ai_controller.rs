@@ -200,7 +200,7 @@ impl AiController {
         // Spawn a task to send periodic position updates
         let tx_periodic = tx;
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             
             loop {
                 interval.tick().await;
