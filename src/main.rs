@@ -6,10 +6,12 @@ use std::sync::Arc;
 mod server;
 mod utils;
 mod config;
+mod scenario;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
 use config::{ProfileConfig, SimulationConfig, FleetConfig};
+use scenario::Scenario;
 
 
 #[derive(Parser)]
@@ -91,9 +93,16 @@ async fn main() -> Result<()> {
             // Load profile
             let profile_path = profile.unwrap_or_else(|| "profiles/TCE + TCNE.json".to_string());
             info!("Loading simulation profile: {}", profile_path);
-            let profile_config = ProfileConfig::load(&profile_path)?;
-            info!("  ✓ {} departure configs", profile_config.std_departures.len());
-            info!("  ✓ {} transit configs", profile_config.std_transits.len());
+            
+            // Load scenario using the new parser
+            let scenario = Scenario::load(&profile_path)?;
+            let stats = scenario.statistics();
+            info!("{}", stats);
+            
+            info!("  Active aerodromes: {:?}", scenario.active_aerodromes());
+            info!("  Master controller: {} on {}", 
+                  scenario.master_controller().0, 
+                  scenario.master_controller().1);
 
             // Create configuration
             let sim_config = SimulationConfig::default();
