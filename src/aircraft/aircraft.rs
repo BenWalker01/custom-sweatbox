@@ -70,8 +70,13 @@ impl Aircraft {
             route.clone(),
         );
 
-        // Parse route to extract fixes
-        let route_fixes = Self::parse_route(&route);
+        // Parse route to extract fixes (this gets the enroute portion)
+        let enroute_fixes = Self::parse_route(&route);
+        
+        // Extract SID waypoints and prepend them to the route
+        let sid_fixes = Self::extract_sid_waypoints(&departure, &route, &runway);
+        let mut route_fixes = sid_fixes;
+        route_fixes.extend(enroute_fixes);
         
         // Extract SID altitude restriction (default to 6000 if not found)
         let sid_altitude = Self::extract_sid_altitude(&departure, &route);
@@ -113,27 +118,85 @@ impl Aircraft {
         default_restrictions
     }
     
+    /// Extract SID waypoints from the SID file
+    fn extract_sid_waypoints(departure: &str, route: &str, runway: &str) -> Vec<String> {
+        // Extract SID name from route (e.g., "CLN2E/22" -> "CLN2E")
+        let sid_name = if let Some(sid_part) = route.split_whitespace().next() {
+            if sid_part.contains('/') {
+                sid_part.split('/').next().unwrap_or("")
+            } else {
+                return Vec::new();
+            }
+        } else {
+            return Vec::new();
+        };
+        
+        // Try to load the SID file for this airport
+        let sid_file = format!("data/Airports/{}/Sids.txt", departure);
+        if let Ok(content) = std::fs::read_to_string(&sid_file) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with(';') {
+                    continue;
+                }
+                
+                // Format: SID:ICAO:RUNWAY:SIDNAME:FIXES...
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 5 && parts[0] == "SID" {
+                    let file_runway = parts[2];
+                    let file_sid_name = parts[3];
+                    
+                    // Match the SID name and runway
+                    if file_sid_name == sid_name && file_runway == runway {
+                        // Parse the waypoints
+                        let fixes_str = parts[4];
+                        let waypoints: Vec<String> = fixes_str
+                            .split_whitespace()
+                            .map(|s| s.to_uppercase())
+                            .collect();
+                        
+                        tracing::debug!("[AIRCRAFT] Found SID {} for runway {}: {} waypoints", 
+                                       sid_name, runway, waypoints.len());
+                        return waypoints;
+                    }
+                }
+            }
+            tracing::warn!("[AIRCRAFT] SID {} not found for runway {} at {}", sid_name, runway, departure);
+        } else {
+            tracing::warn!("[AIRCRAFT] Could not read SID file: {}", sid_file);
+        }
+        
+        Vec::new()
+    }
+    
     /// Parse route string to extract fix names
     fn parse_route(route: &str) -> Vec<String> {
         let mut fixes = Vec::new();
         
-        // Split by spaces and common route separators
-        let parts: Vec<&str> = route.split(|c: char| c.is_whitespace() || c == '/')
+        // Split by spaces
+        let parts: Vec<&str> = route.split(|c: char| c.is_whitespace())
             .filter(|s| !s.is_empty())
             .collect();
         
         for part in parts {
-            // Skip SID/STAR notation (ends with numbers like CLN2E/22)
+            // Skip SID/STAR notation with runway (e.g., CLN2E/22)
             if part.contains("/") {
                 continue;
             }
             
-            // Skip airway designators (start with letters followed by numbers)
-            if part.len() >= 2 && part.chars().next().unwrap().is_alphabetic() {
-                let has_digit = part.chars().any(|c| c.is_numeric());
-                if has_digit && part.len() <= 5 {
-                    // Likely an airway like P44, M197, Q295
-                    continue;
+            // Skip airway designators (start with letters followed by numbers, max 5 chars)
+            if part.len() >= 2 && part.len() <= 5 {
+                let chars: Vec<char> = part.chars().collect();
+                if chars[0].is_alphabetic() {
+                    let has_digit = chars.iter().any(|c| c.is_numeric());
+                    let mostly_letters_then_numbers = 
+                        chars.iter().take_while(|c| c.is_alphabetic()).count() <= 2 &&
+                        has_digit;
+                    
+                    if mostly_letters_then_numbers {
+                        // Likely an airway like P44, M197, Q295
+                        continue;
+                    }
                 }
             }
             
@@ -142,7 +205,7 @@ impl Aircraft {
                 continue;
             }
             
-            // This is likely a fix name
+            // This is likely a fix name (3-6 characters, all alphabetic)
             if part.len() >= 3 && part.len() <= 6 && part.chars().all(|c| c.is_alphabetic()) {
                 fixes.push(part.to_uppercase());
             }
@@ -171,6 +234,13 @@ impl Aircraft {
                     self.phase = FlightPhase::Climbing;
                     self.altitude = 50;
                     self.target_speed = 250;
+                    
+                    // Set initial heading towards first waypoint (which is now the first SID waypoint)
+                    if !self.route_fixes.is_empty() {
+                        if let Some((fix_lat, fix_lon)) = fix_db.get(&self.route_fixes[0]) {
+                            self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+                        }
+                    }
                 }
             }
             
@@ -203,7 +273,7 @@ impl Aircraft {
                     self.target_speed = 300;
                 }
                 
-                // Navigate to next fix
+                // Navigate to next fix (this handles turning)
                 self.navigate_to_next_fix(fix_db, delta_time, sim_config);
                 
                 // Check if reached final cruise altitude

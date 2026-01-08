@@ -73,20 +73,23 @@ impl AiPilot {
         heading: i32,
         squawk: &str
     ) -> Result<()> {
-        // FSD pilot position format: @N:<callsign>:<squawk>:<rating>:<lat>:<lon>:<alt>:<groundspeed>:<pbh>:<flags>
+        // FSD pilot position format: @<transponder flag>:<callsign>:<squawk code>:1:<latitude>:<longitude>:<altitude>:0:<heading>:0
+        // Heading encoding: ((heading * 2.88 + 0.5) * 4) as integer
+        let encoded_heading = ((heading as f64 * 2.88 + 0.5) * 4.0) as i32;
+        
         let position_message = format!(
-            "@N:{}:{}:1:{:.6}:{:.6}:{}:{}:0:0:0\r\n",
+            "@N:{}:{}:1:{:.6}:{:.6}:{}:0:{}:0\r\n",
             self.callsign,
             squawk,
             lat,
             lon,
             altitude,
-            ground_speed
+            encoded_heading
         );
 
         self.send_raw(&position_message).await?;
-        debug!("[AI PILOT] Position update sent for {}: lat={:.6}, lon={:.6}, alt={}, spd={}, hdg={}", 
-               self.callsign, lat, lon, altitude, ground_speed, heading);
+        debug!("[AI PILOT] Position update sent for {}: lat={:.6}, lon={:.6}, alt={}, spd={}, hdg={} (encoded={})", 
+               self.callsign, lat, lon, altitude, ground_speed, heading, encoded_heading);
         
         Ok(())
     }
