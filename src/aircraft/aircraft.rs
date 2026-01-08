@@ -72,6 +72,9 @@ impl Aircraft {
 
         // Parse route to extract fixes
         let route_fixes = Self::parse_route(&route);
+        
+        // Extract SID altitude restriction (default to 6000 if not found)
+        let sid_altitude = Self::extract_sid_altitude(&departure, &route);
 
         Self {
             callsign,
@@ -88,13 +91,28 @@ impl Aircraft {
             phase: FlightPhase::OnGround,
             departure_runway: runway,
             departure_heading: runway_heading,
-            target_altitude: cruise_altitude as i32 * 100,
+            target_altitude: sid_altitude,
             target_heading: runway_heading,
             target_speed: 250,
             spawn_time: std::time::Instant::now(),
         }
     }
 
+    /// Placeholder for SID stop altitude - maybe just let UKCP set the tag and read from there??
+    fn extract_sid_altitude(departure: &str, route: &str) -> i32 {
+        // Common SID altitude restrictions by airport
+        let default_restrictions = match departure {
+            "EGSS" => 4000,  
+            "EGGW" => 5000,  
+            "EGLC" => 3000,
+            "EGLL" => 6000,  
+            "EGKK" => 4000,  
+            _ => 6000,       
+        };
+        
+        default_restrictions
+    }
+    
     /// Parse route string to extract fix names
     fn parse_route(route: &str) -> Vec<String> {
         let mut fixes = Vec::new();
@@ -157,8 +175,16 @@ impl Aircraft {
             }
             
             FlightPhase::Climbing => {
-                // Climb at configured rate
-                let climb_rate = sim_config.climb_rate * delta_time;
+                // Realistic climb rate: 1500-2500 ft/min depending on altitude
+                let climb_rate_fpm = if self.altitude < 10000 {
+                    2000.0  // Higher rate at lower altitudes
+                } else if self.altitude < 20000 {
+                    1800.0  // Moderate rate
+                } else {
+                    1500.0  // Lower rate at higher altitudes
+                };
+                
+                let climb_rate = (climb_rate_fpm / 60.0) * delta_time;  // Convert to ft/sec
                 self.altitude += climb_rate as i32;
                 
                 // Accelerate to target speed
@@ -166,7 +192,13 @@ impl Aircraft {
                     self.ground_speed += (10.0 * delta_time) as u32;
                 }
                 
-                // Update speed restrictions
+                // Update speed restrictions and target altitude
+                if self.altitude >= self.target_altitude && self.target_altitude < (self.flight_plan.cruise_altitude as i32 * 100) {
+                    // Reached SID altitude, now climb to cruise
+                    self.target_altitude = self.flight_plan.cruise_altitude as i32 * 100;
+                    self.target_speed = 250;  // Maintain 250 until above 10000
+                }
+                
                 if self.altitude > 10000 && self.target_speed < 300 {
                     self.target_speed = 300;
                 }
@@ -174,9 +206,9 @@ impl Aircraft {
                 // Navigate to next fix
                 self.navigate_to_next_fix(fix_db, delta_time, sim_config);
                 
-                // Check if reached cruise altitude
-                if self.altitude >= self.target_altitude {
-                    self.altitude = self.target_altitude;
+                // Check if reached final cruise altitude
+                if self.altitude >= (self.flight_plan.cruise_altitude as i32 * 100) {
+                    self.altitude = self.flight_plan.cruise_altitude as i32 * 100;
                     self.phase = FlightPhase::Cruise;
                     self.target_speed = self.flight_plan.cruise_speed;
                 }

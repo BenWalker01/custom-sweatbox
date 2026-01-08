@@ -105,10 +105,10 @@ impl Default for SimulationConfig {
 
         Self {
             port: 6809,
-            turn_rate: 2.0,
+            turn_rate: 3.0,  // 3 degrees per second (standard rate turn)
             taxi_speed: 15.0,
             push_speed: 5.0,
-            climb_rate: 2500.0,
+            climb_rate: 2000.0,  // 2000 ft/min default
             descent_rate: -2000.0,
             high_descent_rate: -3000.0,
             time_multiplier: 1.0,
