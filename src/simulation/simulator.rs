@@ -1,13 +1,17 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tracing::{info, debug};
 use tokio::time::{interval, Duration};
+use rand::Rng;
 
 use crate::scenario::Scenario;
 use crate::config::{SimulationConfig, FleetConfig};
 use crate::utils::navigation::FixDatabase;
 use crate::utils::performance::PerformanceDatabase;
+use crate::aircraft::Aircraft;
 use super::ai_controller::AiController;
+use super::ai_pilot::AiPilot;
 
 /// Main simulation controller
 pub struct Simulator {
@@ -18,7 +22,10 @@ pub struct Simulator {
     perf_db: Arc<PerformanceDatabase>,
     server_addr: String,
     ai_controllers: Vec<AiController>,
+    aircraft: Vec<Aircraft>,
+    pilot_clients: HashMap<String, AiPilot>,
     running: bool,
+    squawk_pool: Vec<u16>,
 }
 
 impl Simulator {
@@ -39,7 +46,10 @@ impl Simulator {
             perf_db,
             server_addr,
             ai_controllers: Vec::new(),
+            aircraft: Vec::new(),
+            pilot_clients: HashMap::new(),
             running: false,
+            squawk_pool: crate::config::get_ccams_squawks(),
         }
     }
 
@@ -150,16 +160,26 @@ impl Simulator {
                 _ = update_interval.tick() => {
                     loop_count += 1;
                     
+                    let delta_time = (radar_update_ms as f64) / 1000.0;
+                    
                     // Check departure timers
                     self.check_departure_spawns(&mut departure_timers, loop_count).await?;
                     
                     // Check transit timers
                     self.check_transit_spawns(&mut transit_timers, loop_count).await?;
                     
-                    // Update all aircraft positions
-                    if loop_count % 10 == 0 {
-                        debug!("[SIMULATOR] Loop {}: {} controllers active", 
-                               loop_count, self.ai_controllers.len());
+                    // Update all aircraft
+                    self.update_aircraft(delta_time);
+                    
+                    // Send pilot position updates every 5 seconds (25 ticks at 5 Hz)
+                    if loop_count % 25 == 0 {
+                        self.broadcast_pilot_positions().await?;
+                    }
+                    
+                    // Log status periodically
+                    if loop_count % 50 == 0 {
+                        debug!("[SIMULATOR] Loop {}: {} controllers, {} aircraft", 
+                               loop_count, self.ai_controllers.len(), self.aircraft.len());
                     }
                 }
             }
@@ -168,6 +188,20 @@ impl Simulator {
         self.running = false;
         info!("[SIMULATOR] Simulation loop stopped");
         Ok(())
+    }
+    
+    /// Update all aircraft positions and states
+    fn update_aircraft(&mut self, delta_time: f64) {
+        let sim_config = self.sim_config.clone();
+        let nav_db = self.nav_db.clone();
+        
+        // Remove aircraft that have completed their routes
+        self.aircraft.retain(|a| !a.is_route_complete());
+        
+        // Update remaining aircraft
+        for aircraft in &mut self.aircraft {
+            aircraft.update(delta_time, &nav_db, &sim_config);
+        }
     }
 
     /// Create departure spawn timers
@@ -194,19 +228,215 @@ impl Simulator {
     }
 
     /// Check and spawn departures
-    async fn check_departure_spawns(&self, timers: &mut [(String, u64, u64)], loop_count: u64) -> Result<()> {
+    async fn check_departure_spawns(&mut self, timers: &mut [(String, u64, u64)], loop_count: u64) -> Result<()> {
         for (aerodrome, interval, last_spawn) in timers.iter_mut() {
             if loop_count - *last_spawn >= *interval {
                 *last_spawn = loop_count;
                 
                 if let Some(route) = self.scenario.random_departure_route(aerodrome) {
-                    info!("[SIMULATOR] Spawning departure: {} -> {} via {}", 
-                          aerodrome, route.arriving, route.route);
-                    // TODO: Create and spawn aircraft
+                    let departure = aerodrome.clone();
+                    let arrival = route.arriving.clone();
+                    let route_str = route.route.clone();
+                    self.spawn_departure(&departure, &arrival, &route_str).await?;
                 }
             }
         }
         Ok(())
+    }
+    
+    /// Spawn a departure aircraft
+    async fn spawn_departure(&mut self, departure: &str, arrival: &str, route: &str) -> Result<()> {
+        // Get airport coordinates
+        let airport_coords = self.get_airport_coords(departure)?;
+        
+        // Get runway information
+        let runway = match self.scenario.active_runway(departure) {
+            Some(r) => r.to_string(),
+            None => return Err(anyhow::anyhow!("No active runway for {}", departure)),
+        };
+        
+        // Parse runway heading (e.g., "27R" -> 270 degrees)
+        let runway_heading = self.parse_runway_heading(&runway);
+        
+        // Generate callsign
+        let callsign = self.generate_callsign(departure)?;
+        
+        // Select aircraft type
+        let aircraft_type = self.select_aircraft_type(departure)?;
+        
+        // Assign squawk
+        let squawk = self.assign_squawk();
+        
+        // Create aircraft
+        let aircraft = Aircraft::new_departure(
+            callsign.clone(),
+            aircraft_type.clone(),
+            squawk.clone(),
+            departure.to_string(),
+            arrival.to_string(),
+            route.to_string(),
+            self.get_cruise_altitude(route),
+            runway,
+            airport_coords,
+            runway_heading,
+        );
+        
+        info!("[SIMULATOR] Spawned departure {} ({}) from {} to {} via {}", 
+              callsign, aircraft.aircraft_type, departure, arrival, 
+              aircraft.current_fix().unwrap_or("route"));
+        
+        // Login pilot to FSD server
+        self.login_pilot(&callsign, &aircraft_type, &squawk).await?;
+        
+        self.aircraft.push(aircraft);
+        
+        Ok(())
+    }
+    
+    /// Login a pilot client to the FSD server
+    async fn login_pilot(&mut self, callsign: &str, aircraft_type: &str, squawk: &str) -> Result<()> {
+        let mut pilot = AiPilot::new(callsign.to_string());
+        pilot.connect(&self.server_addr).await?;
+        pilot.login(aircraft_type, squawk).await?;
+        
+        info!("[SIMULATOR] Pilot {} logged in to FSD server", callsign);
+        
+        self.pilot_clients.insert(callsign.to_string(), pilot);
+        Ok(())
+    }
+    
+    /// Broadcast all pilot positions to FSD server
+    async fn broadcast_pilot_positions(&mut self) -> Result<()> {
+        let mut disconnected = Vec::new();
+        
+        for aircraft in &self.aircraft {
+            if let Some(pilot) = self.pilot_clients.get_mut(&aircraft.callsign) {
+                info!("[SIMULATOR] Broadcasting position for {}: phase={:?}, alt={}, spd={}, hdg={}, pos=({:.6}, {:.6}), fix={:?}", 
+                      aircraft.callsign, 
+                      aircraft.phase,
+                      aircraft.altitude,
+                      aircraft.ground_speed,
+                      aircraft.heading,
+                      aircraft.latitude,
+                      aircraft.longitude,
+                      aircraft.current_fix());
+                
+                if let Err(e) = pilot.send_position(
+                    aircraft.latitude,
+                    aircraft.longitude,
+                    aircraft.altitude,
+                    aircraft.ground_speed,
+                    aircraft.heading,
+                    &aircraft.squawk
+                ).await {
+                    info!("[SIMULATOR] Failed to send position for {}: {}", aircraft.callsign, e);
+                    disconnected.push(aircraft.callsign.clone());
+                }
+            }
+        }
+        
+        // Remove disconnected pilots
+        for callsign in disconnected {
+            self.pilot_clients.remove(&callsign);
+        }
+        
+        Ok(())
+    }
+    
+    /// Get airport coordinates from navigation database
+    fn get_airport_coords(&self, icao: &str) -> Result<(f64, f64)> {
+        // Try to find airport in fix database
+        if let Some(coords) = self.nav_db.get(icao) {
+            return Ok(*coords);
+        }
+        
+        // Default coordinates for common UK airports
+        let coords = match icao {
+            "EGSS" => (51.885, 0.235),   // Stansted
+            "EGGW" => (51.875, -0.368),  // Luton
+            "EGLC" => (51.505, 0.055),   // London City
+            "EGLL" => (51.471, -0.461),  // Heathrow
+            "EGKK" => (51.148, -0.190),  // Gatwick
+            _ => return Err(anyhow::anyhow!("Unknown airport: {}", icao)),
+        };
+        
+        Ok(coords)
+    }
+    
+    /// Parse runway heading from runway identifier
+    fn parse_runway_heading(&self, runway: &str) -> i32 {
+        // Extract numeric part (e.g., "27R" -> 27)
+        let numeric: String = runway.chars().filter(|c| c.is_numeric()).collect();
+        if let Ok(rwy_num) = numeric.parse::<i32>() {
+            rwy_num * 10
+        } else {
+            0
+        }
+    }
+    
+    /// Generate a callsign for an aircraft
+    fn generate_callsign(&self, departure: &str) -> Result<String> {
+        let mut rng = rand::thread_rng();
+        
+        // Get airline for this airport
+        let airlines = self.fleet_config.airports.get(departure)
+            .ok_or_else(|| anyhow::anyhow!("No airlines configured for {}", departure))?;
+        
+        let airline = airlines.get(rng.gen_range(0..airlines.len()))
+            .ok_or_else(|| anyhow::anyhow!("No airline selected"))?;
+        
+        // Generate flight number
+        let flight_num = rng.gen_range(1..9999);
+        
+        Ok(format!("{}{:04}", airline, flight_num))
+    }
+    
+    /// Select an aircraft type for departure
+    fn select_aircraft_type(&self, departure: &str) -> Result<String> {
+        let mut rng = rand::thread_rng();
+        
+        // Get airlines for this airport
+        let airlines = self.fleet_config.airports.get(departure)
+            .ok_or_else(|| anyhow::anyhow!("No airlines for {}", departure))?;
+        
+        let airline = airlines.get(rng.gen_range(0..airlines.len()))
+            .ok_or_else(|| anyhow::anyhow!("No airline selected"))?;
+        
+        // Get aircraft types for this airline
+        let aircraft_types = self.fleet_config.airlines.get(airline)
+            .ok_or_else(|| anyhow::anyhow!("No aircraft types for {}", airline))?;
+        
+        let aircraft_type = aircraft_types.get(rng.gen_range(0..aircraft_types.len()))
+            .ok_or_else(|| anyhow::anyhow!("No aircraft type selected"))?;
+        
+        Ok(aircraft_type.clone())
+    }
+    
+    /// Assign a squawk code
+    fn assign_squawk(&mut self) -> String {
+        if let Some(squawk) = self.squawk_pool.pop() {
+            format!("{:04}", squawk)
+        } else {
+            // Fallback if pool is empty
+            let mut rng = rand::thread_rng();
+            format!("{:04}", rng.gen_range(2000..7777))
+        }
+    }
+    
+    /// Extract cruise altitude from route
+    fn get_cruise_altitude(&self, route: &str) -> u32 {
+        // Look for FL in route (e.g., FL350)
+        if let Some(fl_pos) = route.find("FL") {
+            let fl_str = &route[fl_pos+2..];
+            if let Some(num_end) = fl_str.find(|c: char| !c.is_numeric()) {
+                if let Ok(fl) = fl_str[..num_end].parse::<u32>() {
+                    return fl;
+                }
+            }
+        }
+        
+        // Default cruise altitude
+        360
     }
 
     /// Check and spawn transits
@@ -229,6 +459,12 @@ impl Simulator {
     pub async fn stop(&mut self) -> Result<()> {
         info!("[SIMULATOR] Stopping simulation...");
         self.running = false;
+        
+        // Disconnect all pilots
+        for (callsign, mut pilot) in self.pilot_clients.drain() {
+            info!("[SIMULATOR] Disconnecting pilot {}", callsign);
+            pilot.disconnect().await?;
+        }
         
         // Disconnect all AI controllers
         for controller in &mut self.ai_controllers {

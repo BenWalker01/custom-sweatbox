@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, error, Level};
+use tracing::{info, Level};
 use std::sync::Arc;
 
 mod server;
@@ -8,6 +8,7 @@ mod utils;
 mod config;
 mod scenario;
 mod simulation;
+mod aircraft;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
