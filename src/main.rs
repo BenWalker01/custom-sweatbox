@@ -1,17 +1,19 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
+use tracing::{info, error, Level};
 use std::sync::Arc;
 
 mod server;
 mod utils;
 mod config;
 mod scenario;
+mod simulation;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
-use config::{ProfileConfig, SimulationConfig, FleetConfig};
+use config::{SimulationConfig, FleetConfig};
 use scenario::Scenario;
+use simulation::Simulator;
 
 
 #[derive(Parser)]
@@ -98,20 +100,60 @@ async fn main() -> Result<()> {
             let scenario = Scenario::load(&profile_path)?;
             let stats = scenario.statistics();
             info!("{}", stats);
-            
-            info!("  Active aerodromes: {:?}", scenario.active_aerodromes());
-            info!("  Master controller: {} on {}", 
-                  scenario.master_controller().0, 
-                  scenario.master_controller().1);
 
             // Create configuration
             let sim_config = SimulationConfig::default();
             let fleet_config = FleetConfig::default();
 
-            // Create and run simulation
+            // Create simulator
+            let mut simulator = Simulator::new(
+                scenario,
+                sim_config,
+                fleet_config,
+                fix_db,
+                perf_db,
+                server,
+            );
 
-
+            // Initialize and run simulation
+            info!("Initializing simulation...");
+            simulator.initialize().await?;
+            
             info!("Starting simulation...");
+            
+            // Setup Ctrl+C handler
+            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let r = running.clone();
+            
+            ctrlc::set_handler(move || {
+                info!("Received Ctrl+C, stopping simulation...");
+                r.store(false, std::sync::atomic::Ordering::SeqCst);
+            }).expect("Error setting Ctrl-C handler");
+            
+            // Run simulation loop
+            let sim_handle = tokio::spawn(async move {
+                if let Err(e) = simulator.run().await {
+                    error!("Simulation error: {}", e);
+                }
+                simulator
+            });
+            
+            // Wait for shutdown signal
+            while running.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            
+            // Stop simulation
+            if !sim_handle.is_finished() {
+                info!("Stopping simulation...");
+                // The simulator will stop on next loop iteration
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            
+            let mut simulator = sim_handle.await?;
+            simulator.stop().await?;
+            
+            info!("Simulation stopped cleanly");
         }
     }
 

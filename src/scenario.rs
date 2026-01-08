@@ -1,8 +1,7 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use std::path::Path;
 use crate::config::{ProfileConfig, DepartureRoute, StandardDeparture, TransitRoute, StandardTransit};
 use rand::seq::SliceRandom;
-use rand::Rng;
 
 /// Represents a loaded scenario with utility methods for simulation
 #[derive(Debug, Clone)]
