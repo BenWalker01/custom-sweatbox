@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use tokio::time::{interval, Duration};
 use rand::Rng;
 
@@ -26,6 +26,7 @@ pub struct Simulator {
     pilot_clients: HashMap<String, AiPilot>,
     running: bool,
     squawk_pool: Vec<u16>,
+    used_callsigns: std::collections::HashSet<String>,
 }
 
 impl Simulator {
@@ -50,6 +51,7 @@ impl Simulator {
             pilot_clients: HashMap::new(),
             running: false,
             squawk_pool: crate::config::get_ccams_squawks(),
+            used_callsigns: std::collections::HashSet::new(),
         }
     }
 
@@ -195,6 +197,19 @@ impl Simulator {
         let sim_config = self.sim_config.clone();
         let nav_db = self.nav_db.clone();
         
+        // Collect callsigns of aircraft that will be removed
+        let removed_callsigns: Vec<String> = self.aircraft
+            .iter()
+            .filter(|a| a.is_route_complete())
+            .map(|a| a.callsign.clone())
+            .collect();
+        
+        // Remove completed aircraft from used callsigns
+        for callsign in &removed_callsigns {
+            self.used_callsigns.remove(callsign);
+            info!("[SIMULATOR] Aircraft {} completed route and removed", callsign);
+        }
+        
         // Remove aircraft that have completed their routes
         self.aircraft.retain(|a| !a.is_route_complete());
         
@@ -291,6 +306,23 @@ impl Simulator {
         // Login pilot to FSD server and send flight plan
         self.login_pilot(&callsign, &aircraft_type, &squawk, &flight_plan_str).await?;
         
+        // Send initial position immediately after login
+        if let Some(pilot) = self.pilot_clients.get_mut(&callsign) {
+            pilot.send_position(
+                aircraft.latitude,
+                aircraft.longitude,
+                aircraft.altitude,
+                aircraft.ground_speed,
+                aircraft.heading,
+                &aircraft.squawk
+            ).await?;
+            info!("[SIMULATOR] Sent initial position for {}: alt={}, pos=({:.6}, {:.6})", 
+                  callsign, aircraft.altitude, aircraft.latitude, aircraft.longitude);
+        }
+        
+        // Mark callsign as used
+        self.used_callsigns.insert(callsign.clone());
+        
         self.aircraft.push(aircraft);
         
         Ok(())
@@ -380,21 +412,30 @@ impl Simulator {
         }
     }
     
-    /// Generate a callsign for an aircraft
-    fn generate_callsign(&self, departure: &str) -> Result<String> {
+    /// Generate a unique callsign for an aircraft
+    fn generate_callsign(&mut self, departure: &str) -> Result<String> {
         let mut rng = rand::thread_rng();
         
         // Get airline for this airport
         let airlines = self.fleet_config.airports.get(departure)
             .ok_or_else(|| anyhow::anyhow!("No airlines configured for {}", departure))?;
         
-        let airline = airlines.get(rng.gen_range(0..airlines.len()))
-            .ok_or_else(|| anyhow::anyhow!("No airline selected"))?;
+        // Try up to 100 times to generate a unique callsign
+        for _ in 0..100 {
+            let airline = airlines.get(rng.gen_range(0..airlines.len()))
+                .ok_or_else(|| anyhow::anyhow!("No airline selected"))?;
+            
+            // Generate flight number
+            let flight_num = rng.gen_range(1..9999);
+            let callsign = format!("{}{:04}", airline, flight_num);
+            
+            // Check if callsign is unique
+            if !self.used_callsigns.contains(&callsign) {
+                return Ok(callsign);
+            }
+        }
         
-        // Generate flight number
-        let flight_num = rng.gen_range(1..9999);
-        
-        Ok(format!("{}{:04}", airline, flight_num))
+        Err(anyhow::anyhow!("Failed to generate unique callsign after 100 attempts"))
     }
     
     /// Select an aircraft type for departure
@@ -409,9 +450,14 @@ impl Simulator {
             .ok_or_else(|| anyhow::anyhow!("No airline selected"))?;
         
         // Get aircraft types for this airline
-        let aircraft_types = self.fleet_config.airlines.get(airline)
-            .ok_or_else(|| anyhow::anyhow!("No aircraft types for {}", airline))?;
+        let aircraft_types = self.fleet_config.airlines.get(airline);
         
+        if aircraft_types.is_none() || aircraft_types.unwrap().is_empty() {
+            warn!("[SIMULATOR] No aircraft types configured for airline {}, using default A320", airline);
+            return Ok("A320".to_string());
+        }
+        
+        let aircraft_types = aircraft_types.unwrap();
         let aircraft_type = aircraft_types.get(rng.gen_range(0..aircraft_types.len()))
             .ok_or_else(|| anyhow::anyhow!("No aircraft type selected"))?;
         

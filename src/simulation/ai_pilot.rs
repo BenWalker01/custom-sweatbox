@@ -1,7 +1,7 @@
 use anyhow::{Result, Context};
 use tokio::net::TcpStream;
 use tokio::io::{AsyncWriteExt};
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 
 /// AI Pilot client that connects to the FSD server
 pub struct AiPilot {
@@ -75,6 +75,7 @@ impl AiPilot {
     ) -> Result<()> {
         // FSD pilot position format: @<transponder flag>:<callsign>:<squawk code>:1:<latitude>:<longitude>:<altitude>:0:<heading>:0
         // Heading encoding: ((heading * 2.88 + 0.5) * 4) as integer
+        // Use @N for Mode C (altitude reporting)
         let encoded_heading = ((heading as f64 * 2.88 + 0.5) * 4.0) as i32;
         
         let position_message = format!(
@@ -132,5 +133,13 @@ impl AiPilot {
     /// Get the callsign
     pub fn callsign(&self) -> &str {
         &self.callsign
+    }
+}
+
+impl Drop for AiPilot {
+    fn drop(&mut self) {
+        if self.stream.is_some() {
+            warn!("[AI PILOT] {} dropped without proper disconnect", self.callsign);
+        }
     }
 }
