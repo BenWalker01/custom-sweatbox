@@ -40,8 +40,6 @@ impl AiPilot {
             return Err(anyhow::anyhow!("Not connected to server"));
         }
 
-        info!("[AI PILOT] {} logging in as {}", self.callsign, aircraft_type);
-
         // FSD pilot login format: #AP<callsign>:<server>:<cid>:<password>:<rating>:<protocol>:<simulator>:<realname>
         let login_message = format!(
             "#AP{}:SERVER:{}:123456:1:100:1:AI Pilot\r\n",
@@ -50,8 +48,6 @@ impl AiPilot {
         );
 
         self.send_raw(&login_message).await?;
-        
-        info!("[AI PILOT] Login message sent for {}: {}", self.callsign, login_message.trim());
 
         // Wait for server response
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -59,7 +55,6 @@ impl AiPilot {
         // Send initial squawk
         let squawk_message = format!("@S:{}:{}\r\n", self.callsign, squawk);
         self.send_raw(&squawk_message).await?;
-        info!("[AI PILOT] Squawk set for {}: {}", self.callsign, squawk);
 
         Ok(())
     }
@@ -99,7 +94,6 @@ impl AiPilot {
     pub async fn send_flight_plan(&mut self, flight_plan: &str) -> Result<()> {
         let fp_message = format!("$FP{}:{}\r\n", self.callsign, flight_plan);
         self.send_raw(&fp_message).await?;
-        info!("[AI PILOT] Flight plan filed for {}: {}", self.callsign, flight_plan);
         Ok(())
     }
 
@@ -117,8 +111,6 @@ impl AiPilot {
     /// Disconnect from the server
     pub async fn disconnect(&mut self) -> Result<()> {
         if let Some(mut stream) = self.stream.take() {
-            info!("[AI PILOT] Disconnecting {}", self.callsign);
-            
             // Send disconnect message
             let disconnect_msg = format!("#DP{}\r\n", self.callsign);
             stream.write_all(disconnect_msg.as_bytes()).await?;

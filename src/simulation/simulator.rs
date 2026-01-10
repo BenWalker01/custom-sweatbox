@@ -316,8 +316,6 @@ impl Simulator {
                 aircraft.heading,
                 &aircraft.squawk
             ).await?;
-            info!("[SIMULATOR] Sent initial position for {}: alt={}, pos=({:.6}, {:.6})", 
-                  callsign, aircraft.altitude, aircraft.latitude, aircraft.longitude);
         }
         
         // Mark callsign as used
@@ -337,8 +335,6 @@ impl Simulator {
         // Send flight plan
         pilot.send_flight_plan(flight_plan).await?;
         
-        info!("[SIMULATOR] Pilot {} logged in to FSD server and filed flight plan", callsign);
-        
         self.pilot_clients.insert(callsign.to_string(), pilot);
         Ok(())
     }
@@ -349,16 +345,6 @@ impl Simulator {
         
         for aircraft in &self.aircraft {
             if let Some(pilot) = self.pilot_clients.get_mut(&aircraft.callsign) {
-                info!("[SIMULATOR] Broadcasting position for {}: phase={:?}, alt={}, spd={}, hdg={}, pos=({:.6}, {:.6}), fix={:?}", 
-                      aircraft.callsign, 
-                      aircraft.phase,
-                      aircraft.altitude,
-                      aircraft.ground_speed,
-                      aircraft.heading,
-                      aircraft.latitude,
-                      aircraft.longitude,
-                      aircraft.current_fix());
-                
                 if let Err(e) = pilot.send_position(
                     aircraft.latitude,
                     aircraft.longitude,
@@ -367,7 +353,6 @@ impl Simulator {
                     aircraft.heading,
                     &aircraft.squawk
                 ).await {
-                    info!("[SIMULATOR] Failed to send position for {}: {}", aircraft.callsign, e);
                     disconnected.push(aircraft.callsign.clone());
                 }
             }

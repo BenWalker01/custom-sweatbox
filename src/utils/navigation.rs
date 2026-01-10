@@ -272,9 +272,40 @@ pub fn load_navigation_data<P: AsRef<Path>>(data_dir: P) -> Result<FixDatabase> 
         if let Ok(airports) = parse_airports(&airports_dir) {
             all_fixes.extend(airports);
         }
+        
+        // Load SID waypoints from airport folders
+        if let Ok(sid_fixes) = parse_sid_waypoints(&airports_dir) {
+            all_fixes.extend(sid_fixes);
+        }
     }
 
     Ok(all_fixes)
+}
+
+/// Parse SID waypoints from airport folders
+fn parse_sid_waypoints<P: AsRef<Path>>(airports_dir: P) -> Result<FixDatabase> {
+    let mut waypoints = HashMap::new();
+    
+    let entries = fs::read_dir(airports_dir.as_ref())
+        .with_context(|| format!("Failed to read airports directory: {:?}", airports_dir.as_ref()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            // Load the Fixes.txt file from each airport folder
+            let fixes_file = path.join("Fixes.txt");
+            
+            if fixes_file.exists() {
+                if let Ok(fixes) = parse_fixes_file(&fixes_file) {
+                    waypoints.extend(fixes);
+                }
+            }
+        }
+    }
+
+    Ok(waypoints)
 }
 
 /// Get coordinates for a fix/navaid/airport

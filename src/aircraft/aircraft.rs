@@ -76,10 +76,19 @@ impl Aircraft {
         // Extract SID waypoints and prepend them to the route
         let sid_fixes = Self::extract_sid_waypoints(&departure, &route, &runway);
         let mut route_fixes = sid_fixes;
-        route_fixes.extend(enroute_fixes);
+        
+        // Add enroute fixes, but skip duplicates (e.g., if SID ends at CLN and route starts with CLN)
+        for fix in enroute_fixes {
+            if route_fixes.is_empty() || route_fixes.last() != Some(&fix) {
+                route_fixes.push(fix);
+            }
+        }
         
         // Extract SID altitude restriction (default to 6000 if not found)
         let sid_altitude = Self::extract_sid_altitude(&departure, &route);
+
+        tracing::info!("[AIRCRAFT] Creating {} with {} route fixes: {:?}", 
+                      callsign, route_fixes.len(), route_fixes);
 
         Self {
             callsign,
@@ -222,6 +231,7 @@ impl Aircraft {
                 if self.spawn_time.elapsed().as_secs() >= 5 {
                     self.phase = FlightPhase::Departing;
                     self.ground_speed = 10;
+                    tracing::info!("[{}] Starting takeoff roll", self.callsign);
                 }
             }
             
@@ -230,16 +240,26 @@ impl Aircraft {
                 if self.ground_speed < 150 {
                     self.ground_speed += (50.0 * delta_time) as u32;
                 } else {
+                    tracing::info!("[{}] Rotation speed reached, route_fixes.len()={}", 
+                                  self.callsign, self.route_fixes.len());
                     // Rotate and start climbing
                     self.phase = FlightPhase::Climbing;
                     self.altitude = 50;
                     self.target_speed = 250;
                     
-                    // Set initial heading towards first waypoint (which is now the first SID waypoint)
+                    // Set initial heading towards first waypoint
                     if !self.route_fixes.is_empty() {
                         if let Some((fix_lat, fix_lon)) = fix_db.get(&self.route_fixes[0]) {
                             self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+                            self.heading = self.target_heading;  // Start turning immediately
+                            tracing::info!("[{}] Airborne, climbing to {} via {}", 
+                                          self.callsign, self.route_fixes[0], self.route_fixes.join(" "));
+                        } else {
+                            tracing::warn!("[{}] First waypoint {} not found in nav database", 
+                                          self.callsign, self.route_fixes[0]);
                         }
+                    } else {
+                        tracing::warn!("[{}] No route fixes available!", self.callsign);
                     }
                 }
             }
@@ -281,6 +301,7 @@ impl Aircraft {
                     self.altitude = self.flight_plan.cruise_altitude as i32 * 100;
                     self.phase = FlightPhase::Cruise;
                     self.target_speed = self.flight_plan.cruise_speed;
+                    tracing::info!("[{}] Reached cruise FL{:03}", self.callsign, self.flight_plan.cruise_altitude);
                 }
             }
             
@@ -315,21 +336,25 @@ impl Aircraft {
             // Calculate distance to fix
             let distance = haversine_nm(self.latitude, self.longitude, *fix_lat, *fix_lon);
             
-            // If within 2 NM of fix, move to next fix
-            if distance < 2.0 {
+            // Calculate required heading to fix
+            let required_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+            
+            // If within 0.5 NM of fix, move to next fix
+            if distance < 0.5 {
                 self.current_fix_index += 1;
                 
                 if self.current_fix_index < self.route_fixes.len() {
                     let next_fix = &self.route_fixes[self.current_fix_index];
                     if let Some((next_lat, next_lon)) = fix_db.get(next_fix) {
                         self.target_heading = heading_from_to(self.latitude, self.longitude, *next_lat, *next_lon);
+                        tracing::info!("[{}] Passed {}, turning to next waypoint: {}", 
+                                      self.callsign, current_fix, next_fix);
                     }
                 }
-            } else {
-                // Turn towards fix
-                let desired_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
-                self.turn_towards(desired_heading, delta_time, sim_config.turn_rate);
             }
+            
+            // Always turn towards the current fix (whether we just updated it or not)
+            self.turn_towards(required_heading, delta_time, sim_config.turn_rate);
         }
     }
 
@@ -340,7 +365,10 @@ impl Aircraft {
         if diff.abs() < 2 {
             self.heading = target;
         } else {
-            let turn_amount = (turn_rate * delta_time) as i32;
+            // Calculate turn amount as float first, then convert to int (fixes rounding to 0)
+            let turn_amount_f = turn_rate * delta_time;
+            let turn_amount = turn_amount_f.max(1.0) as i32;  // Ensure at least 1 degree per update
+            
             if diff > 0 {
                 self.heading += turn_amount.min(diff);
             } else {

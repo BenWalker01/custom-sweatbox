@@ -180,11 +180,6 @@ impl AiController {
                                     continue;
                                 }
                                 debug!("[AI CONTROLLER] {} received: {}", callsign, message);
-                                
-                                // Handle specific message types if needed
-                                if message.starts_with("#TM") {
-                                    info!("[AI CONTROLLER] {} - Server message: {}", callsign, message);
-                                }
                             }
                         }
                     }
