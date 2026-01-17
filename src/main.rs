@@ -6,10 +6,15 @@ use std::sync::Arc;
 mod server;
 mod utils;
 mod config;
+mod scenario;
+mod simulation;
+mod aircraft;
 
 use utils::navigation::load_navigation_data;
 use utils::performance::load_performance_data;
-use config::{ProfileConfig, SimulationConfig, FleetConfig};
+use config::{SimulationConfig, FleetConfig};
+use scenario::Scenario;
+use simulation::Simulator;
 
 
 #[derive(Parser)]
@@ -91,18 +96,49 @@ async fn main() -> Result<()> {
             // Load profile
             let profile_path = profile.unwrap_or_else(|| "profiles/TCE + TCNE.json".to_string());
             info!("Loading simulation profile: {}", profile_path);
-            let profile_config = ProfileConfig::load(&profile_path)?;
-            info!("  ✓ {} departure configs", profile_config.std_departures.len());
-            info!("  ✓ {} transit configs", profile_config.std_transits.len());
+            
+            // Load scenario using the new parser
+            let scenario = Scenario::load(&profile_path)?;
+            let stats = scenario.statistics();
+            info!("{}", stats);
 
             // Create configuration
             let sim_config = SimulationConfig::default();
             let fleet_config = FleetConfig::default();
 
-            // Create and run simulation
+            // Create simulator
+            let mut simulator = Simulator::new(
+                scenario,
+                sim_config,
+                fleet_config,
+                fix_db,
+                perf_db,
+                server,
+            );
 
-
+            // Initialize and run simulation
+            info!("Initializing simulation...");
+            simulator.initialize().await?;
+            
             info!("Starting simulation...");
+            
+            // Create shutdown channel
+            let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+            
+            // Setup Ctrl+C handler
+            ctrlc::set_handler(move || {
+                info!("Received Ctrl+C, stopping simulation...");
+                let _ = shutdown_tx.send(());
+            }).expect("Error setting Ctrl-C handler");
+            
+            // Run simulation loop
+            simulator.run(shutdown_rx).await?;
+            
+            // Stop simulation
+            info!("Stopping simulation...");
+            simulator.stop().await?;
+            
+            info!("Simulation stopped cleanly");
         }
     }
 

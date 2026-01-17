@@ -20,12 +20,12 @@
         ["LTC_SE_CTR", "20530"],
         ["EGLL_N_APP", "19730"],
         ["EGKK_APP", "26825"],
-        ["EGLC_APP", "32255"]
+        ["EGLC_APP", "28025"]
     ],
     "stdDepartures": [
         {
             "departing": "EGSS",
-            "interval": 180,
+            "interval": 10,
             "routes": [
                 {"route": "CLN2E/22 CLN P44 RATLO M197 REDFA", "arriving": "EHAM"},
                 {"route": "CLN2E/22 CLN P44 SOMVA", "arriving": "EDDF"},

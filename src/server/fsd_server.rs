@@ -101,6 +101,7 @@ impl FsdServer {
                         if message.is_empty() {
                             continue;
                         }
+                        info!("[RECV] {}: {}", addr, message);
 
                         // Determine client type on first message
                         if first_message {
