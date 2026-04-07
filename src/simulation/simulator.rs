@@ -9,6 +9,7 @@ use rand::Rng;
 use crate::scenario::Scenario;
 use crate::config::{SimulationConfig, FleetConfig};
 use crate::utils::navigation::{FixDatabase, sf_coords_to_decimal};
+use crate::utils::procedures::load_stars;
 use crate::utils::performance::PerformanceDatabase;
 use crate::aircraft::Aircraft;
 use super::ai_controller::AiController;
@@ -457,9 +458,25 @@ impl Simulator {
             return Ok(());
         }
 
-        if payload.eq_ignore_ascii_case("HOLD") {
-            info!("[SIMULATOR] {} HOLD not implemented", callsign);
-            return Ok(());
+        if payload.to_ascii_uppercase().starts_with("HOLD") {
+            let hold_fix = payload
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|token| !token.is_empty())
+                .map(|token| token.to_uppercase())
+                .find(|token| token != "HOLD" && token != "AT");
+
+            return self.assign_hold(callsign, hold_fix.as_deref(), from_controller);
+        }
+
+        if payload.to_ascii_uppercase().starts_with("STAR") {
+            let star_name = payload.get(4..).unwrap_or("").trim();
+
+            if star_name.is_empty() {
+                warn!("[SIMULATOR] {} ignored STAR for {} (missing STAR name)", from_controller, callsign);
+                return Ok(());
+            }
+
+            return self.assign_star(callsign, star_name, from_controller);
         }
 
         if payload.eq_ignore_ascii_case("ILS") {
@@ -499,6 +516,117 @@ impl Simulator {
                 warn!("[SIMULATOR] {} ignored direct {} for {} (fix unavailable)", from_controller, direct_fix, callsign);
             }
         }
+
+        Ok(())
+    }
+
+    fn assign_hold(&mut self, callsign: &str, requested_fix: Option<&str>, from_controller: &str) -> Result<()> {
+        let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) else {
+            return Ok(());
+        };
+
+        if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+            warn!("[SIMULATOR] {} ignored HOLD for {} (tag not assumed)", from_controller, callsign);
+            return Ok(());
+        }
+
+        let selected_fix = if let Some(fix) = requested_fix {
+            Some(fix.to_uppercase())
+        } else {
+            let aircraft = &self.aircraft[index];
+            aircraft
+                .route_fixes
+                .get(aircraft.current_fix_index..)
+                .and_then(|remaining| remaining.last().cloned())
+                .or_else(|| aircraft.route_fixes.last().cloned())
+        };
+
+        let Some(hold_fix) = selected_fix else {
+            warn!("[SIMULATOR] {} ignored HOLD for {} (no hold fix available)", from_controller, callsign);
+            return Ok(());
+        };
+
+        let aircraft = &mut self.aircraft[index];
+        if aircraft.assign_hold(&hold_fix, &self.nav_db) {
+            info!("[SIMULATOR] {} hold armed at {}", callsign, hold_fix);
+        } else {
+            warn!("[SIMULATOR] {} ignored HOLD {} for {} (fix unavailable)", from_controller, hold_fix, callsign);
+        }
+
+        Ok(())
+    }
+
+    fn assign_star(&mut self, callsign: &str, star_name: &str, from_controller: &str) -> Result<()> {
+        let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) else {
+            return Ok(());
+        };
+
+        if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+            warn!("[SIMULATOR] {} ignored STAR {} for {} (tag not assumed)", from_controller, star_name, callsign);
+            return Ok(());
+        }
+
+        let destination = self.aircraft[index].flight_plan.arrival.clone();
+        let Some(active_runway) = self.scenario.active_runway(&destination).map(|r| r.to_string()) else {
+            warn!("[SIMULATOR] No active runway for destination {} ({} STAR ignored)", destination, callsign);
+            return Ok(());
+        };
+
+        let stars = load_stars(format!("data/Airports/{}", destination))?;
+        if stars.is_empty() {
+            warn!("[SIMULATOR] No STAR data for {} ({} STAR {} ignored)", destination, callsign, star_name);
+            return Ok(());
+        }
+
+        let requested_star = star_name.trim().to_uppercase();
+
+        let Some((_, star_runways)) = stars.iter().find(|(name, _)| {
+            let normalized = name.trim_start_matches('#');
+            normalized.eq_ignore_ascii_case(&requested_star)
+        }) else {
+            warn!("[SIMULATOR] STAR {} not found for {} ({} ignored)", requested_star, destination, callsign);
+            return Ok(());
+        };
+
+        let star_fixes_raw = if let Some(fixes) = star_runways
+            .iter()
+            .find(|(runway, _)| runway.eq_ignore_ascii_case(&active_runway))
+            .map(|(_, fixes)| fixes.clone())
+        {
+            fixes
+        } else if let Some((_, fixes)) = star_runways.iter().next() {
+            warn!(
+                "[SIMULATOR] STAR {} has no runway {} variant for {}; using first available variant",
+                requested_star,
+                active_runway,
+                callsign
+            );
+            fixes.clone()
+        } else {
+            warn!("[SIMULATOR] STAR {} has no usable fix list for {}", requested_star, callsign);
+            return Ok(());
+        };
+
+        let star_fixes: Vec<String> = star_fixes_raw
+            .split_whitespace()
+            .filter(|token| !token.starts_with('#'))
+            .map(|token| token.to_uppercase())
+            .collect();
+
+        if star_fixes.is_empty() {
+            warn!("[SIMULATOR] STAR {} resolved to no fixes for {}", requested_star, callsign);
+            return Ok(());
+        }
+
+        let aircraft = &mut self.aircraft[index];
+        let added = aircraft.append_route_fixes(star_fixes);
+        info!(
+            "[SIMULATOR] {} STAR {} appended {} fixes for runway {}",
+            callsign,
+            requested_star,
+            added,
+            active_runway
+        );
 
         Ok(())
     }

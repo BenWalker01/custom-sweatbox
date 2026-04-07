@@ -4,8 +4,8 @@ This checklist tracks features that exist in the legacy Python sweatbox but are 
 
 ## P0 - Core Training Control Gaps
 
-- [ ] Implement HOLD command behavior (racetrack logic, timed legs, fix-specific defaults)
-- [ ] Implement STAR assignment command behavior (append STAR fixes from airport STAR data)
+- [x] Implement HOLD command behavior (racetrack logic, timed legs, fix-specific defaults)
+- [x] Implement STAR assignment command behavior (append STAR fixes from airport STAR data)
 - [ ] Implement LVL-by-fix behavior (be level by waypoint, not just direct-to parsing)
 - [ ] Implement full handoff flow: outbound HO generation, inbound HA/HT behavior 
 - [ ] Implement release-point ownership model (`currentlyWithData` equivalent) with automatic handoff triggers on route

@@ -34,6 +34,19 @@ pub struct IlsGuidance {
     pub runway_elevation_ft: i32,
 }
 
+/// Hold guidance definition
+#[derive(Debug, Clone)]
+pub struct HoldGuidance {
+    pub fix: String,
+    pub fix_lat: f64,
+    pub fix_lon: f64,
+    pub outbound_heading: i32,
+    pub turn_right: bool,
+    pub active: bool,
+    pub leg_seconds: f64,
+    pub leg_elapsed: f64,
+}
+
 /// Aircraft state
 #[derive(Debug, Clone)]
 pub struct Aircraft {
@@ -59,6 +72,7 @@ pub struct Aircraft {
     pub assumed_by: Option<String>,
     pub auto_climb_to_cruise: bool,
     pub ils_guidance: Option<IlsGuidance>,
+    pub hold_guidance: Option<HoldGuidance>,
     
     // Departure info
     pub departure_runway: String,
@@ -132,6 +146,7 @@ impl Aircraft {
             assumed_by: None,
             auto_climb_to_cruise: true,
             ils_guidance: None,
+            hold_guidance: None,
             departure_runway: runway,
             departure_heading: runway_heading,
             target_altitude: sid_altitude,
@@ -314,7 +329,13 @@ impl Aircraft {
 
                 match self.lateral_mode {
                     LateralMode::FlightPlan => self.navigate_to_next_fix(fix_db, delta_time, sim_config),
-                    LateralMode::Heading => self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate),
+                    LateralMode::Heading => {
+                        if self.hold_guidance.as_ref().is_some_and(|hold| hold.active) {
+                            self.update_hold_guidance(delta_time, sim_config);
+                        } else {
+                            self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate);
+                        }
+                    }
                     LateralMode::Ils => self.update_ils_guidance(delta_time, sim_config),
                 }
 
@@ -425,6 +446,63 @@ impl Aircraft {
         }
     }
 
+    fn update_hold_guidance(&mut self, delta_time: f64, sim_config: &crate::config::SimulationConfig) {
+        let Some(hold_state) = self.hold_guidance.as_ref() else {
+            self.lateral_mode = LateralMode::FlightPlan;
+            return;
+        };
+
+        let turn_right = hold_state.turn_right;
+        let fix_lat = hold_state.fix_lat;
+        let fix_lon = hold_state.fix_lon;
+        let outbound_heading = hold_state.outbound_heading;
+
+        if !hold_state.active {
+            return;
+        }
+
+        if self.heading != self.target_heading {
+            self.turn_towards_with_direction(
+                self.target_heading,
+                delta_time,
+                sim_config.turn_rate,
+                Some(turn_right),
+            );
+
+            if self.heading == self.target_heading {
+                if let Some(hold) = self.hold_guidance.as_mut() {
+                    hold.leg_elapsed = 0.0;
+                }
+            }
+
+            return;
+        }
+
+        let mut elapsed_ready = false;
+        if let Some(hold) = self.hold_guidance.as_mut() {
+            hold.leg_elapsed += delta_time;
+            if hold.leg_elapsed >= hold.leg_seconds {
+                hold.leg_elapsed = 0.0;
+                elapsed_ready = true;
+            }
+        }
+
+        if !elapsed_ready {
+            return;
+        }
+
+        // When close to the hold fix, snap over it and restart with the
+        // published outbound heading before reversing back inbound.
+        if haversine_nm(self.latitude, self.longitude, fix_lat, fix_lon) < 0.5 {
+            self.latitude = fix_lat;
+            self.longitude = fix_lon;
+            self.heading = outbound_heading;
+            self.target_heading = outbound_heading;
+        }
+
+        self.target_heading = (self.target_heading + 180) % 360;
+    }
+
     /// Navigate towards the next fix
     fn navigate_to_next_fix(&mut self, fix_db: &FixDatabase, delta_time: f64, sim_config: &crate::config::SimulationConfig) {
         while self.current_fix_index < self.route_fixes.len() {
@@ -444,6 +522,11 @@ impl Aircraft {
 
             // If within 0.5 NM of fix, move to next fix and evaluate again this tick.
             if distance < 0.5 {
+                if self.should_activate_hold(&current_fix) {
+                    self.activate_hold_mode();
+                    return;
+                }
+
                 self.current_fix_index += 1;
 
                 if self.current_fix_index < self.route_fixes.len() {
@@ -462,6 +545,16 @@ impl Aircraft {
 
     /// Turn towards a target heading
     fn turn_towards(&mut self, target: i32, delta_time: f64, turn_rate: f64) {
+        self.turn_towards_with_direction(target, delta_time, turn_rate, None);
+    }
+
+    fn turn_towards_with_direction(
+        &mut self,
+        target: i32,
+        delta_time: f64,
+        turn_rate: f64,
+        preferred_right: Option<bool>,
+    ) {
         let diff = ((target - self.heading + 540) % 360) - 180;
         
         if diff.abs() < 2 {
@@ -470,11 +563,23 @@ impl Aircraft {
             // Calculate turn amount as float first, then convert to int (fixes rounding to 0)
             let turn_amount_f = turn_rate * delta_time;
             let turn_amount = turn_amount_f.max(1.0) as i32;  // Ensure at least 1 degree per update
-            
-            if diff > 0 {
-                self.heading += turn_amount.min(diff);
-            } else {
-                self.heading -= turn_amount.min(diff.abs());
+
+            match preferred_right {
+                Some(true) => {
+                    let right_diff = (target - self.heading + 360) % 360;
+                    self.heading += turn_amount.min(right_diff);
+                }
+                Some(false) => {
+                    let left_diff = (self.heading - target + 360) % 360;
+                    self.heading -= turn_amount.min(left_diff);
+                }
+                None => {
+                    if diff > 0 {
+                        self.heading += turn_amount.min(diff);
+                    } else {
+                        self.heading -= turn_amount.min(diff.abs());
+                    }
+                }
             }
             
             // Normalize heading
@@ -513,6 +618,7 @@ impl Aircraft {
         self.target_heading = (heading % 360 + 360) % 360;
         self.lateral_mode = LateralMode::Heading;
         self.ils_guidance = None;
+        self.hold_guidance = None;
     }
 
     /// Apply a speed assignment.
@@ -551,6 +657,7 @@ impl Aircraft {
         self.auto_climb_to_cruise = false;
         self.lateral_mode = LateralMode::Ils;
         self.phase = FlightPhase::Approach;
+        self.hold_guidance = None;
 
         if self.target_speed > 200 {
             self.target_speed = 200;
@@ -561,6 +668,47 @@ impl Aircraft {
     pub fn resume_navigation(&mut self) {
         self.lateral_mode = LateralMode::FlightPlan;
         self.ils_guidance = None;
+        self.hold_guidance = None;
+    }
+
+    /// Append fixes to the existing route, skipping immediate duplicates.
+    pub fn append_route_fixes(&mut self, fixes: Vec<String>) -> usize {
+        let mut added = 0;
+
+        for fix in fixes {
+            let fix = fix.to_uppercase();
+            if self.route_fixes.last().is_some_and(|last| last == &fix) {
+                continue;
+            }
+
+            self.route_fixes.push(fix);
+            added += 1;
+        }
+
+        added
+    }
+
+    /// Arm a hold at a fix. Hold activates when crossing that fix while route-following.
+    pub fn assign_hold(&mut self, fix: &str, fix_db: &FixDatabase) -> bool {
+        let hold_fix = fix.to_uppercase();
+        let Some((fix_lat, fix_lon)) = fix_db.get(&hold_fix) else {
+            return false;
+        };
+
+        let (outbound_heading, turn_right) = Self::hold_defaults(&hold_fix);
+
+        self.hold_guidance = Some(HoldGuidance {
+            fix: hold_fix,
+            fix_lat: *fix_lat,
+            fix_lon: *fix_lon,
+            outbound_heading,
+            turn_right,
+            active: false,
+            leg_seconds: 55.0,
+            leg_elapsed: 0.0,
+        });
+
+        true
     }
 
     /// Proceed direct to a fix. If it is not in the remaining route but exists in
@@ -576,6 +724,7 @@ impl Aircraft {
                 }
                 self.lateral_mode = LateralMode::FlightPlan;
                 self.ils_guidance = None;
+                self.hold_guidance = None;
 
                 if let Some((fix_lat, fix_lon)) = fix_db.get(&target_fix) {
                     self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
@@ -592,6 +741,7 @@ impl Aircraft {
             self.current_fix_index += offset;
             self.lateral_mode = LateralMode::FlightPlan;
             self.ils_guidance = None;
+            self.hold_guidance = None;
 
             if let Some((fix_lat, fix_lon)) = fix_db.get(&target_fix) {
                 self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
@@ -602,6 +752,7 @@ impl Aircraft {
             self.route_fixes.insert(self.current_fix_index, target_fix);
             self.lateral_mode = LateralMode::FlightPlan;
             self.ils_guidance = None;
+            self.hold_guidance = None;
 
             let inserted_fix = &self.route_fixes[self.current_fix_index];
             if let Some((fix_lat, fix_lon)) = fix_db.get(inserted_fix) {
@@ -637,5 +788,50 @@ impl Aircraft {
     /// Check if aircraft has completed its route
     pub fn is_route_complete(&self) -> bool {
         self.current_fix_index >= self.route_fixes.len()
+    }
+
+    fn should_activate_hold(&self, current_fix: &str) -> bool {
+        self.hold_guidance.as_ref().is_some_and(|hold| {
+            !hold.active && current_fix.eq_ignore_ascii_case(&hold.fix)
+        })
+    }
+
+    fn activate_hold_mode(&mut self) {
+        let Some(hold) = self.hold_guidance.as_mut() else {
+            return;
+        };
+
+        self.lateral_mode = LateralMode::Heading;
+        self.heading = hold.outbound_heading;
+        self.target_heading = hold.outbound_heading;
+        hold.active = true;
+        hold.leg_elapsed = hold.leg_seconds + 1.0;
+
+        tracing::info!(
+            "[{}] Entering hold at {} outbound {} {} turns",
+            self.callsign,
+            hold.fix,
+            hold.outbound_heading,
+            if hold.turn_right { "right" } else { "left" }
+        );
+    }
+
+    fn hold_defaults(fix: &str) -> (i32, bool) {
+        match fix {
+            "BIG" => (302, true),
+            "LAM" => (262, false),
+            "BNN" => (116, true),
+            "OCK" => (328, true),
+            "TIMBA" => (307, true),
+            "WILLO" => (284, false),
+            "JACKO" => (264, false),
+            "GODLU" => (309, true),
+            "DAYNE" => (311, true),
+            "ROSUN" => (172, true),
+            "MIRSI" => (61, true),
+            "TARTN" => (15, false),
+            "STIRA" => (233, true),
+            _ => (307, true),
+        }
     }
 }
