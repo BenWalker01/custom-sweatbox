@@ -302,6 +302,13 @@ impl Aircraft {
                     }
                 }
 
+                // Above 10,000 ft, begin accelerating toward filed cruise speed.
+                if self.lateral_mode != LateralMode::Ils && self.altitude > 10_000 {
+                    if self.target_speed < self.flight_plan.cruise_speed {
+                        self.target_speed = self.flight_plan.cruise_speed;
+                    }
+                }
+
                 self.update_vertical_profile(delta_time, sim_config);
                 self.update_speed_profile(delta_time);
 
