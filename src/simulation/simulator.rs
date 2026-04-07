@@ -221,6 +221,11 @@ impl Simulator {
         }
 
         for message in buffered_messages {
+            if message.starts_with("$CQ") && message.contains("@94835") {
+                info!("[SIMULATOR CTRL RX] {}", message);
+            } else if message.starts_with("$HA") {
+                info!("[SIMULATOR HANDOFF RX] {}", message);
+            }
             self.handle_controller_message(&message).await?;
         }
 
@@ -255,6 +260,9 @@ impl Simulator {
 
         // Sim command channel used by legacy sweatbox control messages.
         if target != "@94835" {
+            if command == "PD" || command == "ROND" || command == "SC" || command == "TA" || command == "IT" || command == "BC" || command == "DR" {
+                info!("[SIMULATOR CTRL DROP] target {} for {}", target, message);
+            }
             return Ok(());
         }
 
@@ -265,13 +273,13 @@ impl Simulator {
                 let callsign = parts[3];
                 if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
                     if let Some(owner) = self.aircraft[index].assumed_by.as_deref() {
-                        if owner != from_controller {
+                        if !owner.eq_ignore_ascii_case(from_controller.trim()) {
                             warn!("[SIMULATOR] {} cannot assume {}; currently assumed by {}", from_controller, callsign, owner);
                             return Ok(());
                         }
                     }
 
-                    self.aircraft[index].set_assumed_by(Some(from_controller.to_string()));
+                    self.aircraft[index].set_assumed_by(Some(from_controller.trim().to_string()));
                     info!("[SIMULATOR] {} assumed by {}", callsign, from_controller);
                 }
             }
@@ -289,24 +297,25 @@ impl Simulator {
                         return Ok(());
                     }
 
-                    let aircraft = &mut self.aircraft[index];
-
                     if let Some(value) = instruction.strip_prefix('H') {
                         if let Ok(target_heading) = value.parse::<i32>() {
-                            aircraft.assign_heading(target_heading);
+                            self.aircraft[index].assign_heading(target_heading);
                             info!("[SIMULATOR] {} heading {}", callsign, target_heading);
                         }
                     } else if let Some(value) = instruction.strip_prefix('S') {
                         if let Ok(target_speed) = value.parse::<u32>() {
-                            aircraft.assign_speed(target_speed);
+                            self.aircraft[index].assign_speed(target_speed);
                             info!("[SIMULATOR] {} speed {}", callsign, target_speed);
                         }
                     } else if let Some(value) = instruction.strip_prefix('M') {
                         if let Ok(mach_times_100) = value.parse::<u32>() {
                             let ias = (((mach_times_100 as f64) / 100.0) * (450.0 / 0.7842)).round() as u32;
-                            aircraft.assign_speed(ias);
+                            self.aircraft[index].assign_speed(ias);
                             info!("[SIMULATOR] {} speed M{} (~{}kt)", callsign, mach_times_100, ias);
                         }
+                    } else {
+                        // Some clients encode direct/route payloads via SC:<callsign>:<FIX>
+                        self.apply_route_payload(callsign, instruction, from_controller)?;
                     }
                 }
             }
@@ -374,16 +383,16 @@ impl Simulator {
             "PD" | "ROND" => {
                 if parts.len() >= 5 {
                     let callsign = parts[3];
-                    let payload = parts[4].trim();
-                    self.apply_route_payload(callsign, payload, from_controller)?;
+                    let payload = Self::payload_from_parts(&parts, 4);
+                    self.apply_route_payload(callsign, &payload, from_controller)?;
                 }
             }
             _ => {
                 // Handle direct-to style packets, e.g. ...:<callsign>:DVR
                 if parts.len() >= 5 {
                     let callsign = parts[3];
-                    let payload = parts[4].trim();
-                    self.apply_route_payload(callsign, payload, from_controller)?;
+                    let payload = Self::payload_from_parts(&parts, 4);
+                    self.apply_route_payload(callsign, &payload, from_controller)?;
                 }
             }
         }
@@ -422,7 +431,24 @@ impl Simulator {
     }
 
     fn controller_has_assumed_tag(aircraft: &Aircraft, controller: &str) -> bool {
-        aircraft.assumed_by.as_deref() == Some(controller)
+        aircraft
+            .assumed_by
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|owner| owner.eq_ignore_ascii_case(controller.trim()))
+    }
+
+    fn payload_from_parts(parts: &[&str], start_index: usize) -> String {
+        if start_index >= parts.len() {
+            String::new()
+        } else {
+            parts[start_index..]
+                .iter()
+                .map(|segment| segment.trim())
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
     }
 
     fn apply_route_payload(&mut self, callsign: &str, payload: &str, from_controller: &str) -> Result<()> {
@@ -440,14 +466,23 @@ impl Simulator {
             return self.assign_ils(callsign, from_controller);
         }
 
-        let direct_fix = payload.strip_prefix("LVL").unwrap_or(payload).trim().to_uppercase();
+        let normalized_payload = payload.strip_prefix("LVL").unwrap_or(payload).trim();
 
-        if !direct_fix.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Ok(());
-        }
+        let direct_fix = normalized_payload
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|token| token.len() >= 2)
+            .map(|token| token.to_uppercase())
+            .find(|token| {
+                token != "DCT"
+                    && token != "DIRECT"
+                    && token != "NAV"
+                    && token != "OWN"
+                    && self.nav_db.contains_key(token)
+            })
+            .unwrap_or_default();
 
-        if !self.nav_db.contains_key(&direct_fix) {
-            warn!("[SIMULATOR] {} ignored direct {} for {} (fix not in nav db)", from_controller, direct_fix, callsign);
+        if direct_fix.is_empty() {
+            warn!("[SIMULATOR] {} ignored direct payload '{}' for {} (no usable fix)", from_controller, payload, callsign);
             return Ok(());
         }
 
@@ -460,6 +495,8 @@ impl Simulator {
             let aircraft = &mut self.aircraft[index];
             if aircraft.direct_to_fix(&direct_fix, &self.nav_db) {
                 info!("[SIMULATOR] {} direct {}", callsign, direct_fix);
+            } else {
+                warn!("[SIMULATOR] {} ignored direct {} for {} (fix unavailable)", from_controller, direct_fix, callsign);
             }
         }
 

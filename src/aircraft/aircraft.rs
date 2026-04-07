@@ -420,35 +420,36 @@ impl Aircraft {
 
     /// Navigate towards the next fix
     fn navigate_to_next_fix(&mut self, fix_db: &FixDatabase, delta_time: f64, sim_config: &crate::config::SimulationConfig) {
-        if self.current_fix_index >= self.route_fixes.len() {
-            return;
-        }
-        
-        let current_fix = &self.route_fixes[self.current_fix_index];
-        
-        if let Some((fix_lat, fix_lon)) = fix_db.get(current_fix) {
+        while self.current_fix_index < self.route_fixes.len() {
+            let current_fix = self.route_fixes[self.current_fix_index].clone();
+
+            let Some((fix_lat, fix_lon)) = fix_db.get(&current_fix) else {
+                tracing::warn!("[{}] Fix {} missing from nav db, skipping", self.callsign, current_fix);
+                self.current_fix_index += 1;
+                continue;
+            };
+
             // Calculate distance to fix
             let distance = haversine_nm(self.latitude, self.longitude, *fix_lat, *fix_lon);
-            
+
             // Calculate required heading to fix
             let required_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
-            
-            // If within 0.5 NM of fix, move to next fix
+
+            // If within 0.5 NM of fix, move to next fix and evaluate again this tick.
             if distance < 0.5 {
                 self.current_fix_index += 1;
-                
+
                 if self.current_fix_index < self.route_fixes.len() {
                     let next_fix = &self.route_fixes[self.current_fix_index];
-                    if let Some((next_lat, next_lon)) = fix_db.get(next_fix) {
-                        self.target_heading = heading_from_to(self.latitude, self.longitude, *next_lat, *next_lon);
-                        tracing::info!("[{}] Passed {}, turning to next waypoint: {}", 
-                                      self.callsign, current_fix, next_fix);
-                    }
+                    tracing::info!("[{}] Passed {}, turning to next waypoint: {}", self.callsign, current_fix, next_fix);
                 }
+                continue;
             }
-            
+
             // Always turn towards the current fix (whether we just updated it or not)
+            self.target_heading = required_heading;
             self.turn_towards(required_heading, delta_time, sim_config.turn_rate);
+            return;
         }
     }
 
@@ -562,12 +563,17 @@ impl Aircraft {
 
         if self.current_fix_index >= self.route_fixes.len() {
             if fix_db.contains_key(&target_fix) {
-                self.route_fixes.push(target_fix);
+                self.route_fixes.push(target_fix.clone());
                 if !self.route_fixes.is_empty() {
                     self.current_fix_index = self.route_fixes.len() - 1;
                 }
                 self.lateral_mode = LateralMode::FlightPlan;
                 self.ils_guidance = None;
+
+                if let Some((fix_lat, fix_lon)) = fix_db.get(&target_fix) {
+                    self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+                }
+
                 return true;
             }
 
@@ -579,11 +585,22 @@ impl Aircraft {
             self.current_fix_index += offset;
             self.lateral_mode = LateralMode::FlightPlan;
             self.ils_guidance = None;
+
+            if let Some((fix_lat, fix_lon)) = fix_db.get(&target_fix) {
+                self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+            }
+
             true
         } else if fix_db.contains_key(&target_fix) {
             self.route_fixes.insert(self.current_fix_index, target_fix);
             self.lateral_mode = LateralMode::FlightPlan;
             self.ils_guidance = None;
+
+            let inserted_fix = &self.route_fixes[self.current_fix_index];
+            if let Some((fix_lat, fix_lon)) = fix_db.get(inserted_fix) {
+                self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
+            }
+
             true
         } else {
             false

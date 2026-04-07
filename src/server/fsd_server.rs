@@ -181,22 +181,16 @@ impl FsdServer {
                             }
                             MessageStatus::ForwardToControllers => {
                                 // Forward to other controllers (not sender)
-                                let sender_callsign = match handler_type {
-                                    Some(ClientType::Controller) => {
-                                        if let Some(ref h) = controller_handler {
-                                            h.lock().await.callsign().to_string()
-                                        } else {
-                                            String::new()
-                                        }
-                                    }
-                                    _ => String::new(),
+                                let sender_controller = match handler_type {
+                                    Some(ClientType::Controller) => controller_handler.as_ref(),
+                                    _ => None,
                                 };
 
-                                Self::forward_to_controllers(message, &controllers, &sender_callsign).await?;
+                                Self::forward_to_controllers(message, &controllers, sender_controller).await?;
                             }
                             MessageStatus::ForwardToAllControllers => {
                                 // Forward to all controllers
-                                Self::forward_to_controllers(message, &controllers, "").await?;
+                                Self::forward_to_controllers(message, &controllers, None).await?;
                             }
                         }
                     }
@@ -275,16 +269,24 @@ impl FsdServer {
     async fn forward_to_controllers(
         message: &str,
         controllers: &Arc<Mutex<Vec<Arc<Mutex<ControllerHandler>>>>>,
-        exclude_callsign: &str,
+        exclude_controller: Option<&Arc<Mutex<ControllerHandler>>>,
     ) -> Result<()> {
         let controllers_lock = controllers.lock().await;
+
+        if message.contains("@94835") {
+            info!("[FORWARD CTRL CMD] {}", message);
+        }
         
         for controller in controllers_lock.iter() {
-            let ctrl = controller.lock().await;
-            if exclude_callsign.is_empty() || ctrl.callsign() != exclude_callsign {
-                if let Err(e) = ctrl.send_message(&[message]).await {
-                    warn!("[ERROR] Failed to send to controller {}: {}", ctrl.callsign(), e);
+            if let Some(sender) = exclude_controller {
+                if Arc::ptr_eq(controller, sender) {
+                    continue;
                 }
+            }
+
+            let ctrl = controller.lock().await;
+            if let Err(e) = ctrl.send_message(&[message]).await {
+                warn!("[ERROR] Failed to send to controller {}: {}", ctrl.callsign(), e);
             }
         }
 
