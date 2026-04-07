@@ -13,6 +13,15 @@ pub enum FlightPhase {
     Landing,
 }
 
+/// Lateral guidance mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum LateralMode {
+    /// Follow route fixes from the flight plan
+    FlightPlan,
+    /// Follow an assigned heading
+    Heading,
+}
+
 /// Aircraft state
 #[derive(Debug, Clone)]
 pub struct Aircraft {
@@ -34,6 +43,9 @@ pub struct Aircraft {
     pub route_fixes: Vec<String>,
     pub current_fix_index: usize,
     pub phase: FlightPhase,
+    pub lateral_mode: LateralMode,
+    pub assumed_by: Option<String>,
+    pub auto_climb_to_cruise: bool,
     
     // Departure info
     pub departure_runway: String,
@@ -103,6 +115,9 @@ impl Aircraft {
             route_fixes,
             current_fix_index: 0,
             phase: FlightPhase::OnGround,
+            lateral_mode: LateralMode::FlightPlan,
+            assumed_by: None,
+            auto_climb_to_cruise: true,
             departure_runway: runway,
             departure_heading: runway_heading,
             target_altitude: sid_altitude,
@@ -113,7 +128,7 @@ impl Aircraft {
     }
 
     /// Placeholder for SID stop altitude - maybe just let UKCP set the tag and read from there??
-    fn extract_sid_altitude(departure: &str, route: &str) -> i32 {
+    fn extract_sid_altitude(departure: &str, _route: &str) -> i32 {
         // Common SID altitude restrictions by airport
         let default_restrictions = match departure {
             "EGSS" => 4000,  
@@ -251,7 +266,7 @@ impl Aircraft {
                     if !self.route_fixes.is_empty() {
                         if let Some((fix_lat, fix_lon)) = fix_db.get(&self.route_fixes[0]) {
                             self.target_heading = heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
-                            self.heading = self.target_heading;  // Start turning immediately
+                            self.heading = self.target_heading;
                             tracing::info!("[{}] Airborne, climbing to {} via {}", 
                                           self.callsign, self.route_fixes[0], self.route_fixes.join(" "));
                         } else {
@@ -263,65 +278,84 @@ impl Aircraft {
                     }
                 }
             }
-            
-            FlightPhase::Climbing => {
-                // Realistic climb rate: 1500-2500 ft/min depending on altitude
-                let climb_rate_fpm = if self.altitude < 10000 {
-                    2000.0  // Higher rate at lower altitudes
-                } else if self.altitude < 20000 {
-                    1800.0  // Moderate rate
-                } else {
-                    1500.0  // Lower rate at higher altitudes
-                };
-                
-                let climb_rate = (climb_rate_fpm / 60.0) * delta_time;  // Convert to ft/sec
-                self.altitude += climb_rate as i32;
-                
-                // Accelerate to target speed
-                if self.ground_speed < self.target_speed {
-                    self.ground_speed += (10.0 * delta_time) as u32;
-                }
-                
-                // Update speed restrictions and target altitude
-                if self.altitude >= self.target_altitude && self.target_altitude < (self.flight_plan.cruise_altitude as i32 * 100) {
-                    // Reached SID altitude, now climb to cruise
-                    self.target_altitude = self.flight_plan.cruise_altitude as i32 * 100;
-                    self.target_speed = 250;  // Maintain 250 until above 10000
-                }
-                
-                if self.altitude > 10000 && self.target_speed < 300 {
-                    self.target_speed = 300;
-                }
-                
-                // Navigate to next fix (this handles turning)
-                self.navigate_to_next_fix(fix_db, delta_time, sim_config);
-                
-                // Check if reached final cruise altitude
-                if self.altitude >= (self.flight_plan.cruise_altitude as i32 * 100) {
-                    self.altitude = self.flight_plan.cruise_altitude as i32 * 100;
-                    self.phase = FlightPhase::Cruise;
-                    self.target_speed = self.flight_plan.cruise_speed;
-                    tracing::info!("[{}] Reached cruise FL{:03}", self.callsign, self.flight_plan.cruise_altitude);
-                }
-            }
-            
-            FlightPhase::Cruise => {
-                // Maintain altitude and navigate
-                self.navigate_to_next_fix(fix_db, delta_time, sim_config);
-                
-                // Accelerate to cruise speed
-                if self.ground_speed < self.target_speed {
-                    self.ground_speed += (5.0 * delta_time) as u32;
-                }
-            }
-            
+
             _ => {
-                // Other phases not implemented yet
+                // If the aircraft is still on managed climb profile, move from SID cap to cruise.
+                if self.auto_climb_to_cruise {
+                    let cruise_altitude = self.flight_plan.cruise_altitude as i32 * 100;
+                    if self.altitude >= self.target_altitude && self.target_altitude < cruise_altitude {
+                        self.target_altitude = cruise_altitude;
+                    }
+                }
+
+                self.update_vertical_profile(delta_time, sim_config);
+                self.update_speed_profile(delta_time);
+
+                match self.lateral_mode {
+                    LateralMode::FlightPlan => self.navigate_to_next_fix(fix_db, delta_time, sim_config),
+                    LateralMode::Heading => self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate),
+                }
+
+                let cruise_altitude = self.flight_plan.cruise_altitude as i32 * 100;
+                if self.altitude >= cruise_altitude && self.target_altitude >= cruise_altitude {
+                    self.phase = FlightPhase::Cruise;
+                } else if self.target_altitude > self.altitude {
+                    self.phase = FlightPhase::Climbing;
+                } else if self.target_altitude < self.altitude {
+                    self.phase = FlightPhase::Descending;
+                }
             }
         }
         
         // Update position based on heading and speed
         self.update_position(delta_time);
+    }
+
+    fn update_vertical_profile(&mut self, delta_time: f64, sim_config: &crate::config::SimulationConfig) {
+        let altitude_delta = self.target_altitude - self.altitude;
+
+        if altitude_delta.abs() <= 50 {
+            self.altitude = self.target_altitude;
+            return;
+        }
+
+        if altitude_delta > 0 {
+            let climb_fpm = if self.altitude < 10000 {
+                sim_config.climb_rate
+            } else {
+                sim_config.climb_rate * 0.8
+            };
+
+            let step = ((climb_fpm / 60.0) * delta_time).max(1.0) as i32;
+            self.altitude += step.min(altitude_delta);
+        } else {
+            let descent_fpm = if altitude_delta.abs() > 6000 {
+                sim_config.high_descent_rate.abs()
+            } else {
+                sim_config.descent_rate.abs()
+            };
+
+            let step = ((descent_fpm / 60.0) * delta_time).max(1.0) as i32;
+            self.altitude -= step.min(altitude_delta.abs());
+        }
+
+        if self.altitude < 0 {
+            self.altitude = 0;
+        }
+    }
+
+    fn update_speed_profile(&mut self, delta_time: f64) {
+        if self.ground_speed == self.target_speed {
+            return;
+        }
+
+        let speed_step = (8.0 * delta_time).max(1.0) as u32;
+
+        if self.ground_speed < self.target_speed {
+            self.ground_speed = (self.ground_speed + speed_step).min(self.target_speed);
+        } else {
+            self.ground_speed = self.ground_speed.saturating_sub(speed_step).max(self.target_speed);
+        }
     }
 
     /// Navigate towards the next fix
@@ -399,6 +433,57 @@ impl Aircraft {
         
         self.latitude = new_lat;
         self.longitude = new_lon;
+    }
+
+    /// Mark which controller currently assumes this aircraft.
+    pub fn set_assumed_by(&mut self, controller: Option<String>) {
+        self.assumed_by = controller;
+    }
+
+    /// Apply a heading assignment and switch to heading mode.
+    pub fn assign_heading(&mut self, heading: i32) {
+        self.target_heading = (heading % 360 + 360) % 360;
+        self.lateral_mode = LateralMode::Heading;
+    }
+
+    /// Apply a speed assignment.
+    pub fn assign_speed(&mut self, speed: u32) {
+        self.target_speed = speed.clamp(120, 500);
+    }
+
+    /// Apply an altitude assignment.
+    pub fn assign_altitude(&mut self, altitude: i32) {
+        self.target_altitude = altitude.max(0);
+        self.auto_climb_to_cruise = false;
+
+        if self.target_altitude > self.altitude {
+            self.phase = FlightPhase::Climbing;
+        } else if self.target_altitude < self.altitude {
+            self.phase = FlightPhase::Descending;
+        }
+    }
+
+    /// Return to route-based navigation mode.
+    pub fn resume_navigation(&mut self) {
+        self.lateral_mode = LateralMode::FlightPlan;
+    }
+
+    /// Proceed direct to a fix already present in the route.
+    pub fn direct_to_fix(&mut self, fix: &str) -> bool {
+        if self.current_fix_index >= self.route_fixes.len() {
+            return false;
+        }
+
+        let target_fix = fix.to_uppercase();
+        let search_slice = &self.route_fixes[self.current_fix_index..];
+
+        if let Some(offset) = search_slice.iter().position(|f| f == &target_fix) {
+            self.current_fix_index += offset;
+            self.lateral_mode = LateralMode::FlightPlan;
+            true
+        } else {
+            false
+        }
     }
 
     /// Format position for FSD protocol

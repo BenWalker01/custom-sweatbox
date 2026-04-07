@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::{info, debug, warn};
 use tokio::time::{interval, Duration};
+use tokio::sync::mpsc::{UnboundedReceiver, error::TryRecvError};
 use rand::Rng;
 
 use crate::scenario::Scenario;
@@ -24,6 +25,7 @@ pub struct Simulator {
     ai_controllers: Vec<AiController>,
     aircraft: Vec<Aircraft>,
     pilot_clients: HashMap<String, AiPilot>,
+    controller_message_rx: Option<UnboundedReceiver<String>>,
     running: bool,
     squawk_pool: Vec<u16>,
     used_callsigns: std::collections::HashSet<String>,
@@ -49,6 +51,7 @@ impl Simulator {
             ai_controllers: Vec::new(),
             aircraft: Vec::new(),
             pilot_clients: HashMap::new(),
+            controller_message_rx: None,
             running: false,
             squawk_pool: crate::config::get_ccams_squawks(),
             used_callsigns: std::collections::HashSet::new(),
@@ -98,7 +101,7 @@ impl Simulator {
         master_controller.send_ip_query().await?;
         
         // Start message loop
-        master_controller.start_message_loop().await?;
+        self.controller_message_rx = master_controller.start_message_loop(true).await?;
         
         self.ai_controllers.push(master_controller);
         
@@ -125,7 +128,7 @@ impl Simulator {
             tokio::time::sleep(Duration::from_millis(300)).await;
             
             controller.send_ip_query().await?;
-            controller.start_message_loop().await?;
+            let _ = controller.start_message_loop(false).await?;
             
             self.ai_controllers.push(controller);
             
@@ -169,6 +172,9 @@ impl Simulator {
                     
                     // Check transit timers
                     self.check_transit_spawns(&mut transit_timers, loop_count).await?;
+
+                    // Apply controller-issued commands to simulated aircraft
+                    self.process_controller_messages().await?;
                     
                     // Update all aircraft
                     self.update_aircraft(delta_time);
@@ -189,6 +195,212 @@ impl Simulator {
         
         self.running = false;
         info!("[SIMULATOR] Simulation loop stopped");
+        Ok(())
+    }
+
+    async fn process_controller_messages(&mut self) -> Result<()> {
+        let mut buffered_messages = Vec::new();
+        let mut disconnected = false;
+
+        if let Some(rx) = self.controller_message_rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(message) => buffered_messages.push(message),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            warn!("[SIMULATOR] Master controller message channel disconnected");
+            self.controller_message_rx = None;
+        }
+
+        for message in buffered_messages {
+            self.handle_controller_message(&message).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_controller_message(&mut self, message: &str) -> Result<()> {
+        // Handle handoff accept messages that clear ownership.
+        if message.starts_with("$HA") {
+            let parts: Vec<&str> = message.split(':').collect();
+            if parts.len() >= 3 {
+                let callsign = parts[2];
+                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                    aircraft.set_assumed_by(None);
+                }
+            }
+            return Ok(());
+        }
+
+        if !message.starts_with("$CQ") {
+            return Ok(());
+        }
+
+        let parts: Vec<&str> = message.split(':').collect();
+        if parts.len() < 4 {
+            return Ok(());
+        }
+
+        let from_controller = parts[0].trim_start_matches("$CQ");
+        let target = parts[1];
+        let command = parts[2];
+
+        // Sim command channel used by legacy sweatbox control messages.
+        if target != "@94835" {
+            return Ok(());
+        }
+
+        let mut remove_callsign: Option<String> = None;
+
+        match command {
+            "IT" => {
+                let callsign = parts[3];
+                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                    aircraft.set_assumed_by(Some(from_controller.to_string()));
+                    info!("[SIMULATOR] {} assumed by {}", callsign, from_controller);
+                }
+            }
+            "SC" => {
+                if parts.len() < 5 {
+                    return Ok(());
+                }
+
+                let callsign = parts[3];
+                let instruction = parts[4];
+
+                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                    if let Some(value) = instruction.strip_prefix('H') {
+                        if let Ok(target_heading) = value.parse::<i32>() {
+                            aircraft.assign_heading(target_heading);
+                            info!("[SIMULATOR] {} heading {}", callsign, target_heading);
+                        }
+                    } else if let Some(value) = instruction.strip_prefix('S') {
+                        if let Ok(target_speed) = value.parse::<u32>() {
+                            aircraft.assign_speed(target_speed);
+                            info!("[SIMULATOR] {} speed {}", callsign, target_speed);
+                        }
+                    } else if let Some(value) = instruction.strip_prefix('M') {
+                        if let Ok(mach_times_100) = value.parse::<u32>() {
+                            let ias = (((mach_times_100 as f64) / 100.0) * (450.0 / 0.7842)).round() as u32;
+                            aircraft.assign_speed(ias);
+                            info!("[SIMULATOR] {} speed M{} (~{}kt)", callsign, mach_times_100, ias);
+                        }
+                    }
+                }
+            }
+            "TA" => {
+                if parts.len() < 5 {
+                    return Ok(());
+                }
+
+                let callsign = parts[3];
+                if let Ok(mut target_altitude) = parts[4].parse::<i32>() {
+                    if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                        if target_altitude == 0 {
+                            target_altitude = aircraft.flight_plan.cruise_altitude as i32 * 100;
+                        }
+
+                        // Legacy code uses TA:1 as an ILS action; keep compatibility by ignoring for now.
+                        if target_altitude == 1 {
+                            info!("[SIMULATOR] {} received TA:1 (ILS shortcut) - not implemented", callsign);
+                            return Ok(());
+                        }
+
+                        aircraft.assign_altitude(target_altitude);
+                        info!("[SIMULATOR] {} altitude {}", callsign, target_altitude);
+                    }
+                }
+            }
+            "BC" => {
+                if parts.len() < 5 {
+                    return Ok(());
+                }
+
+                let callsign = parts[3];
+                let squawk = parts[4];
+
+                if squawk == "7000" {
+                    return Ok(());
+                }
+
+                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                    aircraft.squawk = squawk.to_string();
+                    info!("[SIMULATOR] {} squawk {}", callsign, squawk);
+                }
+            }
+            "DR" => {
+                remove_callsign = Some(parts[3].to_string());
+            }
+            _ => {
+                // Handle direct-to style packets, e.g. ...:<callsign>:DVR
+                if parts.len() >= 5 {
+                    let callsign = parts[3];
+                    let payload = parts[4].trim();
+
+                    if payload.is_empty() {
+                        return Ok(());
+                    }
+
+                    if payload.eq_ignore_ascii_case("ILS") || payload.eq_ignore_ascii_case("HOLD") {
+                        info!("[SIMULATOR] {} command {} not implemented", callsign, payload);
+                        return Ok(());
+                    }
+
+                    let direct_fix = if let Some(level_fix) = payload.strip_prefix("LVL") {
+                        level_fix
+                    } else {
+                        payload
+                    };
+
+                    if direct_fix.chars().all(|c| c.is_ascii_alphabetic()) {
+                        if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                            if aircraft.direct_to_fix(direct_fix) {
+                                info!("[SIMULATOR] {} direct {}", callsign, direct_fix);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(callsign) = remove_callsign {
+            self.remove_aircraft_by_callsign(&callsign).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn remove_aircraft_by_callsign(&mut self, callsign: &str) -> Result<()> {
+        let removed_squawk = self.aircraft
+            .iter()
+            .find(|a| a.callsign == callsign)
+            .and_then(|a| a.squawk.parse::<u16>().ok());
+
+        let before = self.aircraft.len();
+        self.aircraft.retain(|a| a.callsign != callsign);
+
+        if before == self.aircraft.len() {
+            return Ok(());
+        }
+
+        self.used_callsigns.remove(callsign);
+        if let Some(squawk) = removed_squawk {
+            self.squawk_pool.push(squawk);
+        }
+
+        if let Some(mut pilot) = self.pilot_clients.remove(callsign) {
+            pilot.disconnect().await?;
+        }
+
+        info!("[SIMULATOR] Removed aircraft {}", callsign);
         Ok(())
     }
     
@@ -320,6 +532,15 @@ impl Simulator {
         
         // Mark callsign as used
         self.used_callsigns.insert(callsign.clone());
+
+        // Mirror legacy behavior: master controller publishes assigned squawk.
+        let (master_callsign, _) = self.scenario.master_controller();
+        let bc_message = format!("$CQ{}:@94835:BC:{}:{}", master_callsign, callsign, squawk);
+        if let Some(master_controller) = self.ai_controllers.first() {
+            if let Err(e) = master_controller.send_message(&bc_message) {
+                warn!("[SIMULATOR] Failed to queue BC message for {}: {}", callsign, e);
+            }
+        }
         
         self.aircraft.push(aircraft);
         

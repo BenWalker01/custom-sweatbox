@@ -128,7 +128,10 @@ impl AiController {
     }
 
     /// Start listening for messages from the server
-    pub async fn start_message_loop(&mut self) -> Result<()> {
+    ///
+    /// When `capture_incoming` is true, incoming raw FSD messages are forwarded
+    /// to the returned receiver for higher-level processing by the simulator.
+    pub async fn start_message_loop(&mut self, capture_incoming: bool) -> Result<Option<mpsc::UnboundedReceiver<String>>> {
         if self.stream.is_none() {
             return Err(anyhow::anyhow!("Not connected to server"));
         }
@@ -147,6 +150,14 @@ impl AiController {
         // Create channel for sending messages
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         self.tx = Some(tx.clone());
+
+        // Optional channel for surfacing incoming packets to the simulator
+        let (incoming_tx, incoming_rx) = if capture_incoming {
+            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         // Spawn a task to handle outgoing messages
         tokio::spawn(async move {
@@ -180,6 +191,10 @@ impl AiController {
                                     continue;
                                 }
                                 debug!("[AI CONTROLLER] {} received: {}", callsign, message);
+
+                                if let Some(tx) = &incoming_tx {
+                                    let _ = tx.send(message.to_string());
+                                }
                             }
                         }
                     }
@@ -212,7 +227,23 @@ impl AiController {
             }
         });
 
-        Ok(())
+        Ok(incoming_rx)
+    }
+
+    /// Queue a raw FSD message for sending.
+    ///
+    /// The trailing CRLF is added automatically when missing.
+    pub fn send_message(&self, message: &str) -> Result<()> {
+        let tx = self.tx.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Controller message loop is not running"))?;
+
+        let mut payload = message.to_string();
+        if !payload.ends_with("\r\n") {
+            payload.push_str("\r\n");
+        }
+
+        tx.send(payload)
+            .map_err(|e| anyhow::anyhow!("Failed to queue controller message: {}", e))
     }
 
     /// Disconnect from the server
