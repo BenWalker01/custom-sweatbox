@@ -8,7 +8,7 @@ use rand::Rng;
 
 use crate::scenario::Scenario;
 use crate::config::{SimulationConfig, FleetConfig};
-use crate::utils::navigation::FixDatabase;
+use crate::utils::navigation::{FixDatabase, sf_coords_to_decimal};
 use crate::utils::performance::PerformanceDatabase;
 use crate::aircraft::Aircraft;
 use super::ai_controller::AiController;
@@ -263,8 +263,15 @@ impl Simulator {
         match command {
             "IT" => {
                 let callsign = parts[3];
-                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
-                    aircraft.set_assumed_by(Some(from_controller.to_string()));
+                if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
+                    if let Some(owner) = self.aircraft[index].assumed_by.as_deref() {
+                        if owner != from_controller {
+                            warn!("[SIMULATOR] {} cannot assume {}; currently assumed by {}", from_controller, callsign, owner);
+                            return Ok(());
+                        }
+                    }
+
+                    self.aircraft[index].set_assumed_by(Some(from_controller.to_string()));
                     info!("[SIMULATOR] {} assumed by {}", callsign, from_controller);
                 }
             }
@@ -276,7 +283,14 @@ impl Simulator {
                 let callsign = parts[3];
                 let instruction = parts[4];
 
-                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
+                    if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+                        warn!("[SIMULATOR] {} ignored SC for {} (tag not assumed)", from_controller, callsign);
+                        return Ok(());
+                    }
+
+                    let aircraft = &mut self.aircraft[index];
+
                     if let Some(value) = instruction.strip_prefix('H') {
                         if let Ok(target_heading) = value.parse::<i32>() {
                             aircraft.assign_heading(target_heading);
@@ -303,17 +317,22 @@ impl Simulator {
 
                 let callsign = parts[3];
                 if let Ok(mut target_altitude) = parts[4].parse::<i32>() {
-                    if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
-                        if target_altitude == 0 {
-                            target_altitude = aircraft.flight_plan.cruise_altitude as i32 * 100;
-                        }
+                    if target_altitude == 1 {
+                        self.apply_route_payload(callsign, "ILS", from_controller)?;
+                        return Ok(());
+                    }
 
-                        // Legacy code uses TA:1 as an ILS action; keep compatibility by ignoring for now.
-                        if target_altitude == 1 {
-                            info!("[SIMULATOR] {} received TA:1 (ILS shortcut) - not implemented", callsign);
+                    if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
+                        if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+                            warn!("[SIMULATOR] {} ignored TA for {} (tag not assumed)", from_controller, callsign);
                             return Ok(());
                         }
 
+                        if target_altitude == 0 {
+                            target_altitude = self.aircraft[index].flight_plan.cruise_altitude as i32 * 100;
+                        }
+
+                        let aircraft = &mut self.aircraft[index];
                         aircraft.assign_altitude(target_altitude);
                         info!("[SIMULATOR] {} altitude {}", callsign, target_altitude);
                     }
@@ -331,42 +350,40 @@ impl Simulator {
                     return Ok(());
                 }
 
-                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
+                if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
+                    if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+                        warn!("[SIMULATOR] {} ignored BC for {} (tag not assumed)", from_controller, callsign);
+                        return Ok(());
+                    }
+
+                    let aircraft = &mut self.aircraft[index];
                     aircraft.squawk = squawk.to_string();
                     info!("[SIMULATOR] {} squawk {}", callsign, squawk);
                 }
             }
             "DR" => {
-                remove_callsign = Some(parts[3].to_string());
+                let callsign = parts[3];
+                if let Some(aircraft) = self.aircraft.iter().find(|a| a.callsign == callsign) {
+                    if !Self::controller_has_assumed_tag(aircraft, from_controller) {
+                        warn!("[SIMULATOR] {} ignored DR for {} (tag not assumed)", from_controller, callsign);
+                        return Ok(());
+                    }
+                    remove_callsign = Some(callsign.to_string());
+                }
+            }
+            "PD" | "ROND" => {
+                if parts.len() >= 5 {
+                    let callsign = parts[3];
+                    let payload = parts[4].trim();
+                    self.apply_route_payload(callsign, payload, from_controller)?;
+                }
             }
             _ => {
                 // Handle direct-to style packets, e.g. ...:<callsign>:DVR
                 if parts.len() >= 5 {
                     let callsign = parts[3];
                     let payload = parts[4].trim();
-
-                    if payload.is_empty() {
-                        return Ok(());
-                    }
-
-                    if payload.eq_ignore_ascii_case("ILS") || payload.eq_ignore_ascii_case("HOLD") {
-                        info!("[SIMULATOR] {} command {} not implemented", callsign, payload);
-                        return Ok(());
-                    }
-
-                    let direct_fix = if let Some(level_fix) = payload.strip_prefix("LVL") {
-                        level_fix
-                    } else {
-                        payload
-                    };
-
-                    if direct_fix.chars().all(|c| c.is_ascii_alphabetic()) {
-                        if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
-                            if aircraft.direct_to_fix(direct_fix) {
-                                info!("[SIMULATOR] {} direct {}", callsign, direct_fix);
-                            }
-                        }
-                    }
+                    self.apply_route_payload(callsign, payload, from_controller)?;
                 }
             }
         }
@@ -402,6 +419,136 @@ impl Simulator {
 
         info!("[SIMULATOR] Removed aircraft {}", callsign);
         Ok(())
+    }
+
+    fn controller_has_assumed_tag(aircraft: &Aircraft, controller: &str) -> bool {
+        aircraft.assumed_by.as_deref() == Some(controller)
+    }
+
+    fn apply_route_payload(&mut self, callsign: &str, payload: &str, from_controller: &str) -> Result<()> {
+        let payload = payload.trim();
+        if payload.is_empty() {
+            return Ok(());
+        }
+
+        if payload.eq_ignore_ascii_case("HOLD") {
+            info!("[SIMULATOR] {} HOLD not implemented", callsign);
+            return Ok(());
+        }
+
+        if payload.eq_ignore_ascii_case("ILS") {
+            return self.assign_ils(callsign, from_controller);
+        }
+
+        let direct_fix = payload.strip_prefix("LVL").unwrap_or(payload).trim().to_uppercase();
+
+        if !direct_fix.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Ok(());
+        }
+
+        if !self.nav_db.contains_key(&direct_fix) {
+            warn!("[SIMULATOR] {} ignored direct {} for {} (fix not in nav db)", from_controller, direct_fix, callsign);
+            return Ok(());
+        }
+
+        if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
+            if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+                warn!("[SIMULATOR] {} ignored direct for {} (tag not assumed)", from_controller, callsign);
+                return Ok(());
+            }
+
+            let aircraft = &mut self.aircraft[index];
+            if aircraft.direct_to_fix(&direct_fix, &self.nav_db) {
+                info!("[SIMULATOR] {} direct {}", callsign, direct_fix);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn assign_ils(&mut self, callsign: &str, from_controller: &str) -> Result<()> {
+        let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) else {
+            return Ok(());
+        };
+
+        if !Self::controller_has_assumed_tag(&self.aircraft[index], from_controller) {
+            warn!("[SIMULATOR] {} ignored ILS for {} (tag not assumed)", from_controller, callsign);
+            return Ok(());
+        }
+
+        let destination = self.aircraft[index].flight_plan.arrival.clone();
+        let Some(active_runway) = self.scenario.active_runway(&destination).map(|r| r.to_string()) else {
+            warn!("[SIMULATOR] No active runway for destination {} ({} ILS ignored)", destination, callsign);
+            return Ok(());
+        };
+
+        let Some((runway_heading, threshold_lat, threshold_lon)) =
+            self.lookup_runway_endpoint(&destination, &active_runway)? else {
+            warn!("[SIMULATOR] Could not resolve runway {} for {} ({} ILS ignored)", active_runway, destination, callsign);
+            return Ok(());
+        };
+
+        let runway_elevation_ft = self.sim_config
+            .airport_elevations
+            .get(&destination)
+            .copied()
+            .unwrap_or(0) as i32;
+
+        let aircraft = &mut self.aircraft[index];
+        aircraft.assign_ils(
+            active_runway.clone(),
+            (threshold_lat, threshold_lon),
+            runway_heading,
+            runway_elevation_ft,
+        );
+
+        info!("[SIMULATOR] {} ILS {} {}", callsign, destination, active_runway);
+        Ok(())
+    }
+
+    fn lookup_runway_endpoint(&self, airport: &str, runway: &str) -> Result<Option<(i32, f64, f64)>> {
+        let runway_path = format!("data/Airports/{}/Runway.txt", airport);
+        let Ok(content) = std::fs::read_to_string(&runway_path) else {
+            return Ok(None);
+        };
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 8 {
+                continue;
+            }
+
+            let rwy_a = parts[0];
+            let rwy_b = parts[1];
+
+            let heading_a = match parts[2].parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let heading_b = match parts[3].parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if runway.eq_ignore_ascii_case(rwy_a) {
+                if let Ok((lat, lon)) = sf_coords_to_decimal(parts[4], parts[5]) {
+                    return Ok(Some((heading_a, lat, lon)));
+                }
+            }
+
+            if runway.eq_ignore_ascii_case(rwy_b) {
+                if let Ok((lat, lon)) = sf_coords_to_decimal(parts[6], parts[7]) {
+                    return Ok(Some((heading_b, lat, lon)));
+                }
+            }
+        }
+
+        Ok(None)
     }
     
     /// Update all aircraft positions and states

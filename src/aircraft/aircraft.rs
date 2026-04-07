@@ -20,6 +20,18 @@ pub enum LateralMode {
     FlightPlan,
     /// Follow an assigned heading
     Heading,
+    /// Fly a basic localizer/glideslope profile to runway threshold
+    Ils,
+}
+
+/// Basic ILS guidance definition
+#[derive(Debug, Clone)]
+pub struct IlsGuidance {
+    pub runway: String,
+    pub threshold_lat: f64,
+    pub threshold_lon: f64,
+    pub runway_heading: i32,
+    pub runway_elevation_ft: i32,
 }
 
 /// Aircraft state
@@ -46,6 +58,7 @@ pub struct Aircraft {
     pub lateral_mode: LateralMode,
     pub assumed_by: Option<String>,
     pub auto_climb_to_cruise: bool,
+    pub ils_guidance: Option<IlsGuidance>,
     
     // Departure info
     pub departure_runway: String,
@@ -118,6 +131,7 @@ impl Aircraft {
             lateral_mode: LateralMode::FlightPlan,
             assumed_by: None,
             auto_climb_to_cruise: true,
+            ils_guidance: None,
             departure_runway: runway,
             departure_heading: runway_heading,
             target_altitude: sid_altitude,
@@ -294,6 +308,7 @@ impl Aircraft {
                 match self.lateral_mode {
                     LateralMode::FlightPlan => self.navigate_to_next_fix(fix_db, delta_time, sim_config),
                     LateralMode::Heading => self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate),
+                    LateralMode::Ils => self.update_ils_guidance(delta_time, sim_config),
                 }
 
                 let cruise_altitude = self.flight_plan.cruise_altitude as i32 * 100;
@@ -355,6 +370,51 @@ impl Aircraft {
             self.ground_speed = (self.ground_speed + speed_step).min(self.target_speed);
         } else {
             self.ground_speed = self.ground_speed.saturating_sub(speed_step).max(self.target_speed);
+        }
+    }
+
+    fn update_ils_guidance(&mut self, delta_time: f64, sim_config: &crate::config::SimulationConfig) {
+        let Some(ils) = self.ils_guidance.as_ref() else {
+            self.lateral_mode = LateralMode::FlightPlan;
+            return;
+        };
+
+        let threshold_lat = ils.threshold_lat;
+        let threshold_lon = ils.threshold_lon;
+        let runway_heading = ils.runway_heading;
+        let runway_elevation_ft = ils.runway_elevation_ft;
+
+        let distance_nm = haversine_nm(self.latitude, self.longitude, threshold_lat, threshold_lon);
+
+        if distance_nm > 8.0 {
+            let intercept_heading = heading_from_to(self.latitude, self.longitude, threshold_lat, threshold_lon);
+            self.turn_towards(intercept_heading, delta_time, sim_config.turn_rate);
+        } else {
+            self.turn_towards(runway_heading, delta_time, sim_config.turn_rate);
+        }
+
+        let glideslope_altitude =
+            ((distance_nm * 6076.0 * 3.0_f64.to_radians().tan()).round() as i32) + runway_elevation_ft;
+
+        if self.altitude > glideslope_altitude + 100 {
+            self.target_altitude = glideslope_altitude.max(runway_elevation_ft);
+        }
+
+        if distance_nm < 10.0 && self.target_speed > 180 {
+            self.target_speed = 180;
+        }
+
+        if distance_nm < 4.0 && self.target_speed > 150 {
+            self.target_speed = 150;
+        }
+
+        if distance_nm < 6.0 {
+            self.phase = FlightPhase::Approach;
+        }
+
+        if distance_nm < 1.0 {
+            self.target_altitude = runway_elevation_ft;
+            self.phase = FlightPhase::Landing;
         }
     }
 
@@ -444,6 +504,7 @@ impl Aircraft {
     pub fn assign_heading(&mut self, heading: i32) {
         self.target_heading = (heading % 360 + 360) % 360;
         self.lateral_mode = LateralMode::Heading;
+        self.ils_guidance = None;
     }
 
     /// Apply a speed assignment.
@@ -463,23 +524,66 @@ impl Aircraft {
         }
     }
 
+    /// Assign an ILS approach using runway threshold and heading.
+    pub fn assign_ils(
+        &mut self,
+        runway: String,
+        threshold: (f64, f64),
+        runway_heading: i32,
+        runway_elevation_ft: i32,
+    ) {
+        self.ils_guidance = Some(IlsGuidance {
+            runway,
+            threshold_lat: threshold.0,
+            threshold_lon: threshold.1,
+            runway_heading,
+            runway_elevation_ft,
+        });
+
+        self.auto_climb_to_cruise = false;
+        self.lateral_mode = LateralMode::Ils;
+        self.phase = FlightPhase::Approach;
+
+        if self.target_speed > 200 {
+            self.target_speed = 200;
+        }
+    }
+
     /// Return to route-based navigation mode.
     pub fn resume_navigation(&mut self) {
         self.lateral_mode = LateralMode::FlightPlan;
+        self.ils_guidance = None;
     }
 
-    /// Proceed direct to a fix already present in the route.
-    pub fn direct_to_fix(&mut self, fix: &str) -> bool {
+    /// Proceed direct to a fix. If it is not in the remaining route but exists in
+    /// nav data, insert it as the immediate next waypoint.
+    pub fn direct_to_fix(&mut self, fix: &str, fix_db: &FixDatabase) -> bool {
+        let target_fix = fix.to_uppercase();
+
         if self.current_fix_index >= self.route_fixes.len() {
+            if fix_db.contains_key(&target_fix) {
+                self.route_fixes.push(target_fix);
+                if !self.route_fixes.is_empty() {
+                    self.current_fix_index = self.route_fixes.len() - 1;
+                }
+                self.lateral_mode = LateralMode::FlightPlan;
+                self.ils_guidance = None;
+                return true;
+            }
+
             return false;
         }
-
-        let target_fix = fix.to_uppercase();
         let search_slice = &self.route_fixes[self.current_fix_index..];
 
         if let Some(offset) = search_slice.iter().position(|f| f == &target_fix) {
             self.current_fix_index += offset;
             self.lateral_mode = LateralMode::FlightPlan;
+            self.ils_guidance = None;
+            true
+        } else if fix_db.contains_key(&target_fix) {
+            self.route_fixes.insert(self.current_fix_index, target_fix);
+            self.lateral_mode = LateralMode::FlightPlan;
+            self.ils_guidance = None;
             true
         } else {
             false
