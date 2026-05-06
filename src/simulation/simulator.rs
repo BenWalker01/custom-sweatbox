@@ -16,6 +16,13 @@ use super::ai_controller::AiController;
 use super::ai_pilot::AiPilot;
 use super::handoff_resolver::{OwnershipDecision, OwnershipResolver};
 
+#[derive(Debug, Clone)]
+struct PendingHandoffAcceptance {
+    accepting_controller: String,
+    from_controller: String,
+    due_at: std::time::Instant,
+}
+
 /// Main simulation controller
 pub struct Simulator {
     scenario: Arc<Scenario>,
@@ -30,6 +37,7 @@ pub struct Simulator {
     controller_message_rxs: Vec<UnboundedReceiver<String>>,
     ownership_resolver: Option<OwnershipResolver>,
     pending_handoffs: HashMap<String, String>,
+    pending_handoff_accepts: HashMap<String, PendingHandoffAcceptance>,
     running: bool,
     squawk_pool: Vec<u16>,
     used_callsigns: HashSet<String>,
@@ -58,6 +66,7 @@ impl Simulator {
             controller_message_rxs: Vec::new(),
             ownership_resolver: None,
             pending_handoffs: HashMap::new(),
+            pending_handoff_accepts: HashMap::new(),
             running: false,
             squawk_pool: crate::config::get_ccams_squawks(),
             used_callsigns: HashSet::new(),
@@ -192,6 +201,9 @@ impl Simulator {
 
                     // Apply automatic sector-based handoff logic for AI-owned aircraft.
                     self.process_automatic_handoffs().await?;
+
+                    // Apply delayed AI handoff accepts (10-30s delay).
+                    self.process_pending_handoff_accepts();
                     
                     // Send pilot position updates every 5 seconds (25 ticks at 5 Hz)
                     if loop_count % 25 == 0 {
@@ -441,6 +453,7 @@ impl Simulator {
         }
 
         self.pending_handoffs.remove(callsign);
+        self.pending_handoff_accepts.remove(callsign);
 
         info!("[SIMULATOR] Removed aircraft {}", callsign);
         Ok(())
@@ -495,6 +508,80 @@ impl Simulator {
         self.send_from_ai_controller(accepting_controller, &message)
     }
 
+    fn schedule_handoff_accept(&mut self, accepting_controller: &str, from_controller: &str, callsign: &str) {
+        let callsign = callsign.trim();
+        let accepting_controller = accepting_controller.trim();
+        let from_controller = from_controller.trim();
+        if callsign.is_empty() || accepting_controller.is_empty() {
+            return;
+        }
+
+        if self.pending_handoff_accepts.get(callsign).is_some_and(|pending| {
+            pending.accepting_controller.eq_ignore_ascii_case(accepting_controller)
+                && pending.from_controller.eq_ignore_ascii_case(from_controller)
+        }) {
+            return;
+        }
+
+        let delay_secs = rand::thread_rng().gen_range(10..=30);
+        let due_at = std::time::Instant::now() + std::time::Duration::from_secs(delay_secs);
+
+        self.pending_handoff_accepts.insert(
+            callsign.to_string(),
+            PendingHandoffAcceptance {
+                accepting_controller: accepting_controller.to_string(),
+                from_controller: from_controller.to_string(),
+                due_at,
+            },
+        );
+
+        info!(
+            "[SIMULATOR] Scheduled delayed HA {} -> {} for {} in {}s",
+            from_controller,
+            accepting_controller,
+            callsign,
+            delay_secs
+        );
+    }
+
+    fn process_pending_handoff_accepts(&mut self) {
+        let now = std::time::Instant::now();
+        let ready: Vec<String> = self
+            .pending_handoff_accepts
+            .iter()
+            .filter_map(|(callsign, pending)| {
+                if pending.due_at <= now {
+                    Some(callsign.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for callsign in ready {
+            let Some(mut pending) = self.pending_handoff_accepts.remove(&callsign) else {
+                continue;
+            };
+
+            if self.send_handoff_accept(
+                &pending.accepting_controller,
+                &pending.from_controller,
+                &callsign,
+            ) {
+                self.pending_handoffs.remove(&callsign);
+                info!(
+                    "[SIMULATOR] Sent delayed HA {} -> {} for {}",
+                    pending.from_controller,
+                    pending.accepting_controller,
+                    callsign
+                );
+            } else {
+                pending.due_at = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                self.pending_handoff_accepts.insert(callsign, pending);
+            }
+        }
+    }
+
     fn handle_handoff_offer(&mut self, message: &str) {
         let parts: Vec<&str> = message.split(':').collect();
         if parts.len() < 3 {
@@ -538,10 +625,15 @@ impl Simulator {
             }
         }
 
-        self.send_handoff_accept(to_controller, from_controller, callsign);
+        self.schedule_handoff_accept(to_controller, from_controller, callsign);
         self.aircraft[index].set_assumed_by(Some(to_controller.to_string()));
         self.pending_handoffs.remove(callsign);
-        info!("[SIMULATOR] Auto-accepted HO {} -> {} for {}", from_controller, to_controller, callsign);
+        info!(
+            "[SIMULATOR] Accepted tag on HO {} -> {} for {} (HA delayed)",
+            from_controller,
+            to_controller,
+            callsign
+        );
     }
 
     fn handle_handoff_accept(&mut self, message: &str) {
@@ -565,6 +657,7 @@ impl Simulator {
         }
 
         self.pending_handoffs.remove(callsign);
+        self.pending_handoff_accepts.remove(callsign);
     }
 
     async fn process_automatic_handoffs(&mut self) -> Result<()> {
@@ -622,10 +715,9 @@ impl Simulator {
             }
 
             if handoff_started && self.is_ai_controller(&target_owner) {
-                self.send_handoff_accept(&target_owner, &from_owner, &callsign);
-                self.pending_handoffs.remove(&callsign);
+                self.schedule_handoff_accept(&target_owner, &from_owner, &callsign);
                 info!(
-                    "[SIMULATOR] Auto-completed AI HO {} -> {} for {}",
+                    "[SIMULATOR] Scheduled AI HA for HO {} -> {} ({})",
                     from_owner,
                     target_owner,
                     callsign
