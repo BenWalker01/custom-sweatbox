@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, debug, warn};
 use tokio::time::{interval, Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, error::TryRecvError};
@@ -14,6 +14,7 @@ use crate::utils::performance::PerformanceDatabase;
 use crate::aircraft::Aircraft;
 use super::ai_controller::AiController;
 use super::ai_pilot::AiPilot;
+use super::handoff_resolver::{OwnershipDecision, OwnershipResolver};
 
 /// Main simulation controller
 pub struct Simulator {
@@ -26,10 +27,12 @@ pub struct Simulator {
     ai_controllers: Vec<AiController>,
     aircraft: Vec<Aircraft>,
     pilot_clients: HashMap<String, AiPilot>,
-    controller_message_rx: Option<UnboundedReceiver<String>>,
+    controller_message_rxs: Vec<UnboundedReceiver<String>>,
+    ownership_resolver: Option<OwnershipResolver>,
+    pending_handoffs: HashMap<String, String>,
     running: bool,
     squawk_pool: Vec<u16>,
-    used_callsigns: std::collections::HashSet<String>,
+    used_callsigns: HashSet<String>,
 }
 
 impl Simulator {
@@ -52,10 +55,12 @@ impl Simulator {
             ai_controllers: Vec::new(),
             aircraft: Vec::new(),
             pilot_clients: HashMap::new(),
-            controller_message_rx: None,
+            controller_message_rxs: Vec::new(),
+            ownership_resolver: None,
+            pending_handoffs: HashMap::new(),
             running: false,
             squawk_pool: crate::config::get_ccams_squawks(),
-            used_callsigns: std::collections::HashSet::new(),
+            used_callsigns: HashSet::new(),
         }
     }
 
@@ -66,6 +71,9 @@ impl Simulator {
         // Display scenario information
         let stats = self.scenario.statistics();
         info!("{}", stats);
+
+        // Build sector ownership resolver used for controller ownership and handoffs.
+        self.initialize_ownership_resolver()?;
         
         // Login AI controllers
         self.login_ai_controllers().await?;
@@ -74,68 +82,70 @@ impl Simulator {
         Ok(())
     }
 
+    fn initialize_ownership_resolver(&mut self) -> Result<()> {
+        let profile = &self.scenario.config;
+        let resolver = OwnershipResolver::from_scenario_data(
+            &profile.active_aerodromes,
+            &profile.active_runways,
+            &profile.active_controllers,
+            &profile.master_controller,
+            &profile.other_controllers,
+            &profile.inactive_sectors,
+            &self.nav_db,
+        )?;
+        self.ownership_resolver = Some(resolver);
+        Ok(())
+    }
+
     /// Login AI controllers to the FSD server
     async fn login_ai_controllers(&mut self) -> Result<()> {
         info!("[SIMULATOR] Logging in AI controllers...");
-        
-        let (master_callsign, master_freq) = self.scenario.master_controller();
-        
-        // Create and login master controller
-        info!("[SIMULATOR] Creating master controller: {} on {}", master_callsign, master_freq);
-        
-        let mut master_controller = AiController::new(
-            master_callsign.to_string(),
-            master_freq.to_string(),
-            51.5,  // Default latitude (central UK)
-            -0.5,  // Default longitude
-            300,   // Range in nautical miles
-        );
-        
-        // Connect and login
-        master_controller.connect(&self.server_addr).await?;
-        master_controller.login().await?;
-        
-        // Wait a bit for the server to process
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        
-        // Send IP query
-        master_controller.send_ip_query().await?;
-        
-        // Start message loop
-        self.controller_message_rx = master_controller.start_message_loop(true).await?;
-        
-        self.ai_controllers.push(master_controller);
-        
-        info!("[SIMULATOR] Master controller {} logged in", master_callsign);
-        
-        // Login other controllers
+
+        self.ai_controllers.clear();
+        self.controller_message_rxs.clear();
+
+        let mut controller_positions = Vec::new();
+        let mut seen = HashSet::new();
+
+        let (primary_callsign, primary_freq) = self.scenario.master_controller();
+        let primary_key = primary_callsign.trim().to_uppercase();
+        if !primary_key.is_empty() && seen.insert(primary_key) {
+            controller_positions.push((primary_callsign.to_string(), primary_freq.to_string()));
+        }
+
         for (callsign, freq) in self.scenario.other_controllers() {
+            let key = callsign.trim().to_uppercase();
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            controller_positions.push((callsign.clone(), freq.clone()));
+        }
+
+        for (callsign, freq) in controller_positions {
             info!("[SIMULATOR] Creating controller: {} on {}", callsign, freq);
-            
+
             let mut controller = AiController::new(
                 callsign.clone(),
-                freq.clone(),
+                freq,
                 51.5,
                 -0.5,
                 300,
             );
-            
+
             controller.connect(&self.server_addr).await?;
-            
-            // Wait a bit between logins
             tokio::time::sleep(Duration::from_millis(200)).await;
-            
             controller.login().await?;
             tokio::time::sleep(Duration::from_millis(300)).await;
-            
             controller.send_ip_query().await?;
-            let _ = controller.start_message_loop(false).await?;
-            
+
+            if let Some(rx) = controller.start_message_loop(true).await? {
+                self.controller_message_rxs.push(rx);
+            }
+
             self.ai_controllers.push(controller);
-            
             info!("[SIMULATOR] Controller {} logged in", callsign);
         }
-        
+
         info!("[SIMULATOR] {} AI controllers logged in", self.ai_controllers.len());
         
         Ok(())
@@ -179,6 +189,9 @@ impl Simulator {
                     
                     // Update all aircraft
                     self.update_aircraft(delta_time);
+
+                    // Apply automatic sector-based handoff logic for AI-owned aircraft.
+                    self.process_automatic_handoffs().await?;
                     
                     // Send pilot position updates every 5 seconds (25 ticks at 5 Hz)
                     if loop_count % 25 == 0 {
@@ -201,30 +214,32 @@ impl Simulator {
 
     async fn process_controller_messages(&mut self) -> Result<()> {
         let mut buffered_messages = Vec::new();
-        let mut disconnected = false;
+        let mut disconnected_indexes = Vec::new();
 
-        if let Some(rx) = self.controller_message_rx.as_mut() {
+        for (index, rx) in self.controller_message_rxs.iter_mut().enumerate() {
             loop {
                 match rx.try_recv() {
                     Ok(message) => buffered_messages.push(message),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
-                        disconnected = true;
+                        disconnected_indexes.push(index);
                         break;
                     }
                 }
             }
         }
 
-        if disconnected {
-            warn!("[SIMULATOR] Master controller message channel disconnected");
-            self.controller_message_rx = None;
+        disconnected_indexes.sort_unstable();
+        disconnected_indexes.dedup();
+        for index in disconnected_indexes.into_iter().rev() {
+            warn!("[SIMULATOR] Controller message channel disconnected");
+            self.controller_message_rxs.swap_remove(index);
         }
 
         for message in buffered_messages {
             if message.starts_with("$CQ") && message.contains("@94835") {
                 info!("[SIMULATOR CTRL RX] {}", message);
-            } else if message.starts_with("$HA") {
+            } else if message.starts_with("$HA") || message.starts_with("$HO") {
                 info!("[SIMULATOR HANDOFF RX] {}", message);
             }
             self.handle_controller_message(&message).await?;
@@ -234,15 +249,13 @@ impl Simulator {
     }
 
     async fn handle_controller_message(&mut self, message: &str) -> Result<()> {
-        // Handle handoff accept messages that clear ownership.
+        if message.starts_with("$HO") {
+            self.handle_handoff_offer(message);
+            return Ok(());
+        }
+
         if message.starts_with("$HA") {
-            let parts: Vec<&str> = message.split(':').collect();
-            if parts.len() >= 3 {
-                let callsign = parts[2];
-                if let Some(aircraft) = self.aircraft.iter_mut().find(|a| a.callsign == callsign) {
-                    aircraft.set_assumed_by(None);
-                }
-            }
+            self.handle_handoff_accept(message);
             return Ok(());
         }
 
@@ -427,7 +440,199 @@ impl Simulator {
             pilot.disconnect().await?;
         }
 
+        self.pending_handoffs.remove(callsign);
+
         info!("[SIMULATOR] Removed aircraft {}", callsign);
+        Ok(())
+    }
+
+    fn resolve_ownership(&self, aircraft: &Aircraft) -> Option<OwnershipDecision> {
+        self.ownership_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve_owner_for_aircraft(aircraft))
+    }
+
+    fn is_ai_controller(&self, callsign: &str) -> bool {
+        self.ai_controllers
+            .iter()
+            .any(|controller| controller.callsign().eq_ignore_ascii_case(callsign.trim()))
+    }
+
+    fn send_from_ai_controller(&self, callsign: &str, message: &str) -> bool {
+        let Some(controller) = self
+            .ai_controllers
+            .iter()
+            .find(|controller| controller.callsign().eq_ignore_ascii_case(callsign.trim()))
+        else {
+            return false;
+        };
+
+        if let Err(error) = controller.send_message(message) {
+            warn!(
+                "[SIMULATOR] Failed to queue message from {} ({}): {}",
+                callsign,
+                message,
+                error
+            );
+            return false;
+        }
+
+        true
+    }
+
+    fn send_handoff_offer(&self, from_controller: &str, to_controller: &str, callsign: &str) -> bool {
+        let message = format!("$HO{}:{}:{}", from_controller.trim(), to_controller.trim(), callsign.trim());
+        self.send_from_ai_controller(from_controller, &message)
+    }
+
+    fn send_handoff_accept(&self, accepting_controller: &str, from_controller: &str, callsign: &str) -> bool {
+        let message = format!(
+            "$HA{}:{}:{}",
+            accepting_controller.trim(),
+            from_controller.trim(),
+            callsign.trim()
+        );
+        self.send_from_ai_controller(accepting_controller, &message)
+    }
+
+    fn handle_handoff_offer(&mut self, message: &str) {
+        let parts: Vec<&str> = message.split(':').collect();
+        if parts.len() < 3 {
+            return;
+        }
+
+        let from_controller = parts[0].trim_start_matches("$HO").trim();
+        let to_controller = parts[1].trim();
+        let callsign = parts[2].trim();
+        if callsign.is_empty() || to_controller.is_empty() {
+            return;
+        }
+
+        // AI controllers only auto-accept when the target controller actually owns
+        // the aircraft's current sector.
+        if !self.is_ai_controller(to_controller) {
+            return;
+        }
+
+        let Some(index) = self.aircraft.iter().position(|aircraft| aircraft.callsign == callsign) else {
+            return;
+        };
+
+        if self.aircraft[index]
+            .assumed_by
+            .as_deref()
+            .is_some_and(|owner| owner.eq_ignore_ascii_case(to_controller))
+        {
+            return;
+        }
+
+        if let Some(decision) = self.resolve_ownership(&self.aircraft[index]) {
+            if !decision.owner_callsign.eq_ignore_ascii_case(to_controller) {
+                debug!(
+                    "[SIMULATOR] Accepting HO {} -> {} for {} despite resolver owner {}",
+                    from_controller,
+                    to_controller,
+                    callsign,
+                    decision.owner_callsign
+                );
+            }
+        }
+
+        self.send_handoff_accept(to_controller, from_controller, callsign);
+        self.aircraft[index].set_assumed_by(Some(to_controller.to_string()));
+        self.pending_handoffs.remove(callsign);
+        info!("[SIMULATOR] Auto-accepted HO {} -> {} for {}", from_controller, to_controller, callsign);
+    }
+
+    fn handle_handoff_accept(&mut self, message: &str) {
+        let parts: Vec<&str> = message.split(':').collect();
+        if parts.len() < 3 {
+            return;
+        }
+
+        let accepting_controller = parts[0].trim_start_matches("$HA").trim();
+        let callsign = parts[2].trim();
+        if callsign.is_empty() {
+            return;
+        }
+
+        if let Some(aircraft) = self.aircraft.iter_mut().find(|aircraft| aircraft.callsign == callsign) {
+            if accepting_controller.is_empty() {
+                aircraft.set_assumed_by(None);
+            } else {
+                aircraft.set_assumed_by(Some(accepting_controller.to_string()));
+            }
+        }
+
+        self.pending_handoffs.remove(callsign);
+    }
+
+    async fn process_automatic_handoffs(&mut self) -> Result<()> {
+        for index in 0..self.aircraft.len() {
+            let callsign = self.aircraft[index].callsign.clone();
+            let expected_owner = self
+                .resolve_ownership(&self.aircraft[index])
+                .map(|decision| decision.owner_callsign);
+
+            let Some(target_owner) = expected_owner else {
+                self.pending_handoffs.remove(&callsign);
+                continue;
+            };
+
+            let current_owner = self.aircraft[index].assumed_by.clone();
+
+            if current_owner
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(&target_owner))
+            {
+                self.pending_handoffs.remove(&callsign);
+                continue;
+            }
+
+            if current_owner.is_none() {
+                // Departures must be explicitly assumed (IT/HA), not auto-assumed.
+                self.pending_handoffs.remove(&callsign);
+                continue;
+            }
+
+            let from_owner = current_owner.unwrap_or_default();
+            if !self.is_ai_controller(&from_owner) {
+                continue;
+            }
+
+            let already_pending = self
+                .pending_handoffs
+                .get(&callsign)
+                .is_some_and(|pending| pending.eq_ignore_ascii_case(&target_owner));
+            if already_pending {
+                continue;
+            }
+
+            let handoff_started = self.send_handoff_offer(&from_owner, &target_owner, &callsign);
+            if handoff_started {
+                self.aircraft[index].set_assumed_by(Some(target_owner.clone()));
+                self.pending_handoffs
+                    .insert(callsign.clone(), target_owner.clone());
+                info!(
+                    "[SIMULATOR] Offered HO {} -> {} for {}",
+                    from_owner,
+                    target_owner,
+                    callsign
+                );
+            }
+
+            if handoff_started && self.is_ai_controller(&target_owner) {
+                self.send_handoff_accept(&target_owner, &from_owner, &callsign);
+                self.pending_handoffs.remove(&callsign);
+                info!(
+                    "[SIMULATOR] Auto-completed AI HO {} -> {} for {}",
+                    from_owner,
+                    target_owner,
+                    callsign
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -819,7 +1024,10 @@ impl Simulator {
             airport_coords,
             runway_heading,
         );
-        
+
+        let resolved_owner = self
+            .resolve_ownership(&aircraft)
+            .map(|decision| decision.owner_callsign);
         info!("[SIMULATOR] Spawned departure {} ({}) from {} to {} via {}", 
               callsign, aircraft.aircraft_type, departure, arrival, 
               aircraft.current_fix().unwrap_or("route"));
@@ -845,12 +1053,14 @@ impl Simulator {
         // Mark callsign as used
         self.used_callsigns.insert(callsign.clone());
 
-        // Mirror legacy behavior: master controller publishes assigned squawk.
-        let (master_callsign, _) = self.scenario.master_controller();
-        let bc_message = format!("$CQ{}:@94835:BC:{}:{}", master_callsign, callsign, squawk);
-        if let Some(master_controller) = self.ai_controllers.first() {
-            if let Err(e) = master_controller.send_message(&bc_message) {
-                warn!("[SIMULATOR] Failed to queue BC message for {}: {}", callsign, e);
+        // Publish assigned squawk from the resolved owner when that owner is AI.
+        let bc_sender = resolved_owner
+            .filter(|owner| self.is_ai_controller(owner))
+            .or_else(|| self.ai_controllers.first().map(|controller| controller.callsign().to_string()));
+        if let Some(sender) = bc_sender {
+            let bc_message = format!("$CQ{}:@94835:BC:{}:{}", sender, callsign, squawk);
+            if !self.send_from_ai_controller(&sender, &bc_message) {
+                warn!("[SIMULATOR] Failed to queue BC message for {}", callsign);
             }
         }
         
@@ -878,7 +1088,7 @@ impl Simulator {
         
         for aircraft in &self.aircraft {
             if let Some(pilot) = self.pilot_clients.get_mut(&aircraft.callsign) {
-                if let Err(e) = pilot.send_position(
+                if let Err(_e) = pilot.send_position(
                     aircraft.latitude,
                     aircraft.longitude,
                     aircraft.altitude,

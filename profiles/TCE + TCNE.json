@@ -6,7 +6,7 @@
         "EGLC": "27",
         "EGLL": "27R"
     },
-    "activeControllers": ["LTC_E_CTR", "LTC_N_CTR", "ESSEX_APP", "EGSS_APP", "EGGW_APP"],
+    "activeControllers": ["LTC_E_CTR", "LTC_NE_CTR", "ESSEX_APP", "EGSS_APP", "EGGW_APP"],
     "masterController": "LON_E_CTR",
     "masterControllerFreq": "18480",
     "otherControllers": [
@@ -15,7 +15,6 @@
         ["LON_NW_CTR", "35580"],
         ["LON_NE_CTR", "28130"],
         ["LTC_M_CTR", "21030"],
-        ["LTC_NE_CTR", "18825"],
         ["LTC_NW_CTR", "21280"],
         ["LTC_SE_CTR", "20530"],
         ["EGLL_N_APP", "19730"],
