@@ -8,12 +8,14 @@ use rand::Rng;
 
 use crate::scenario::Scenario;
 use crate::config::{SimulationConfig, FleetConfig};
-use crate::utils::navigation::{FixDatabase, sf_coords_to_decimal};
+use crate::utils::navigation::{FixDatabase, haversine_nm, heading_from_to, sf_coords_to_decimal};
 use crate::utils::procedures::load_stars;
 use crate::utils::performance::PerformanceDatabase;
 use crate::aircraft::Aircraft;
+use crate::aircraft::aircraft::FlightPhase;
 use super::ai_controller::AiController;
 use super::ai_pilot::AiPilot;
+use super::agreement_resolver::AgreementResolver;
 use super::handoff_resolver::{OwnershipDecision, OwnershipResolver};
 
 #[derive(Debug, Clone)]
@@ -21,6 +23,13 @@ struct PendingHandoffAcceptance {
     accepting_controller: String,
     from_controller: String,
     due_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTransitProfileHandoff {
+    preferred_controller: String,
+    handoff_fix: String,
+    agreed_altitude_ft: i32,
 }
 
 /// Main simulation controller
@@ -35,9 +44,11 @@ pub struct Simulator {
     aircraft: Vec<Aircraft>,
     pilot_clients: HashMap<String, AiPilot>,
     controller_message_rxs: Vec<UnboundedReceiver<String>>,
+    agreement_resolver: Option<AgreementResolver>,
     ownership_resolver: Option<OwnershipResolver>,
     pending_handoffs: HashMap<String, String>,
     pending_handoff_accepts: HashMap<String, PendingHandoffAcceptance>,
+    pending_transit_handoffs: HashMap<String, PendingTransitProfileHandoff>,
     running: bool,
     squawk_pool: Vec<u16>,
     used_callsigns: HashSet<String>,
@@ -64,9 +75,11 @@ impl Simulator {
             aircraft: Vec::new(),
             pilot_clients: HashMap::new(),
             controller_message_rxs: Vec::new(),
+            agreement_resolver: None,
             ownership_resolver: None,
             pending_handoffs: HashMap::new(),
             pending_handoff_accepts: HashMap::new(),
+            pending_transit_handoffs: HashMap::new(),
             running: false,
             squawk_pool: crate::config::get_ccams_squawks(),
             used_callsigns: HashSet::new(),
@@ -83,6 +96,7 @@ impl Simulator {
 
         // Build sector ownership resolver used for controller ownership and handoffs.
         self.initialize_ownership_resolver()?;
+        self.initialize_agreement_resolver()?;
         
         // Login AI controllers
         self.login_ai_controllers().await?;
@@ -103,6 +117,12 @@ impl Simulator {
             &self.nav_db,
         )?;
         self.ownership_resolver = Some(resolver);
+        Ok(())
+    }
+
+    fn initialize_agreement_resolver(&mut self) -> Result<()> {
+        let resolver = AgreementResolver::load_from_dir("data/Agreements/Internal")?;
+        self.agreement_resolver = Some(resolver);
         Ok(())
     }
 
@@ -198,6 +218,9 @@ impl Simulator {
                     
                     // Update all aircraft
                     self.update_aircraft(delta_time);
+
+                    // Apply profile-defined pre-handoff behavior for transits.
+                    self.process_profile_transit_handoffs();
 
                     // Apply automatic sector-based handoff logic for AI-owned aircraft.
                     self.process_automatic_handoffs().await?;
@@ -454,6 +477,7 @@ impl Simulator {
 
         self.pending_handoffs.remove(callsign);
         self.pending_handoff_accepts.remove(callsign);
+        self.pending_transit_handoffs.remove(callsign);
 
         info!("[SIMULATOR] Removed aircraft {}", callsign);
         Ok(())
@@ -469,6 +493,10 @@ impl Simulator {
         self.ai_controllers
             .iter()
             .any(|controller| controller.callsign().eq_ignore_ascii_case(callsign.trim()))
+    }
+
+    fn is_controller_online(&self, callsign: &str) -> bool {
+        self.is_ai_controller(callsign)
     }
 
     fn send_from_ai_controller(&self, callsign: &str, message: &str) -> bool {
@@ -582,6 +610,92 @@ impl Simulator {
         }
     }
 
+    fn process_profile_transit_handoffs(&mut self) {
+        let pending_callsigns: Vec<String> = self.pending_transit_handoffs.keys().cloned().collect();
+
+        for callsign in pending_callsigns {
+            let Some(plan) = self.pending_transit_handoffs.get(&callsign).cloned() else {
+                continue;
+            };
+
+            let Some(index) = self.aircraft.iter().position(|aircraft| aircraft.callsign == callsign) else {
+                self.pending_transit_handoffs.remove(&callsign);
+                continue;
+            };
+
+            let Some(current_owner) = self.aircraft[index].assumed_by.clone() else {
+                continue;
+            };
+            if !self.is_ai_controller(&current_owner) {
+                continue;
+            }
+
+            if (self.aircraft[index].altitude - plan.agreed_altitude_ft).abs() > 300 {
+                self.aircraft[index].assign_altitude(plan.agreed_altitude_ft);
+                continue;
+            }
+
+            let Some((fix_lat, fix_lon)) = self.nav_db.get(&plan.handoff_fix) else {
+                warn!(
+                    "[SIMULATOR] Transit {} missing handoff fix {}, dropping fallback handoff plan",
+                    callsign,
+                    plan.handoff_fix
+                );
+                self.pending_transit_handoffs.remove(&callsign);
+                continue;
+            };
+
+            let distance_nm = haversine_nm(
+                self.aircraft[index].latitude,
+                self.aircraft[index].longitude,
+                *fix_lat,
+                *fix_lon,
+            );
+            if distance_nm > 10.0 {
+                continue;
+            }
+
+            let target_controller = if !plan.preferred_controller.is_empty()
+                && self.is_controller_online(&plan.preferred_controller)
+            {
+                plan.preferred_controller.clone()
+            } else {
+                self.resolve_ownership(&self.aircraft[index])
+                    .map(|decision| decision.owner_callsign)
+                    .or_else(|| {
+                        if plan.preferred_controller.is_empty() {
+                            None
+                        } else {
+                            Some(plan.preferred_controller.clone())
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+
+            if target_controller.is_empty() || current_owner.eq_ignore_ascii_case(&target_controller) {
+                self.pending_transit_handoffs.remove(&callsign);
+                continue;
+            }
+
+            if self.send_handoff_offer(&current_owner, &target_controller, &callsign) {
+                self.aircraft[index].set_assumed_by(Some(target_controller.clone()));
+                self.pending_handoffs.insert(callsign.clone(), target_controller.clone());
+                self.pending_transit_handoffs.remove(&callsign);
+                info!(
+                    "[SIMULATOR] Transit pre-handoff {} -> {} for {} near {}",
+                    current_owner,
+                    target_controller,
+                    callsign,
+                    plan.handoff_fix
+                );
+
+                if self.is_ai_controller(&target_controller) {
+                    self.schedule_handoff_accept(&target_controller, &current_owner, &callsign);
+                }
+            }
+        }
+    }
+
     fn handle_handoff_offer(&mut self, message: &str) {
         let parts: Vec<&str> = message.split(':').collect();
         if parts.len() < 3 {
@@ -658,6 +772,7 @@ impl Simulator {
 
         self.pending_handoffs.remove(callsign);
         self.pending_handoff_accepts.remove(callsign);
+        self.pending_transit_handoffs.remove(callsign);
     }
 
     async fn process_automatic_handoffs(&mut self) -> Result<()> {
@@ -1311,16 +1426,198 @@ impl Simulator {
         360
     }
 
+    /// Spawn an enroute transit aircraft
+    async fn spawn_transit(
+        &mut self,
+        departure: &str,
+        arrival: &str,
+        route: &str,
+        current_level_ft: u32,
+        cruise_level_ft: u32,
+        first_controller: &str,
+    ) -> Result<()> {
+        let callsign = self.generate_callsign(departure)?;
+        let aircraft_type = self.select_aircraft_type(departure)?;
+        let squawk = self.assign_squawk();
+
+        // Reuse route parsing/flight-plan setup from departure construction,
+        // then shift to an enroute state at a known fix.
+        let mut aircraft = Aircraft::new_departure(
+            callsign.clone(),
+            aircraft_type.clone(),
+            squawk.clone(),
+            departure.to_string(),
+            arrival.to_string(),
+            route.to_string(),
+            (cruise_level_ft / 100).max(1),
+            "00".to_string(),
+            (0.0, 0.0),
+            0,
+        );
+
+        let Some(spawn_fix_index) = aircraft
+            .route_fixes
+            .iter()
+            .position(|fix| self.nav_db.contains_key(fix))
+        else {
+            return Err(anyhow::anyhow!(
+                "No known navigation fix available for transit route: {}",
+                route
+            ));
+        };
+
+        let spawn_fix = aircraft.route_fixes[spawn_fix_index].clone();
+        let (spawn_lat, spawn_lon) = *self
+            .nav_db
+            .get(&spawn_fix)
+            .ok_or_else(|| anyhow::anyhow!("Missing nav coordinates for transit fix {}", spawn_fix))?;
+
+        aircraft.latitude = spawn_lat;
+        aircraft.longitude = spawn_lon;
+        aircraft.current_fix_index = (spawn_fix_index + 1).min(aircraft.route_fixes.len().saturating_sub(1));
+
+        if aircraft.current_fix_index < aircraft.route_fixes.len() {
+            if let Some((next_lat, next_lon)) = self.nav_db.get(&aircraft.route_fixes[aircraft.current_fix_index]) {
+                let initial_heading = heading_from_to(spawn_lat, spawn_lon, *next_lat, *next_lon);
+                aircraft.heading = initial_heading;
+                aircraft.target_heading = initial_heading;
+            }
+        }
+
+        aircraft.altitude = current_level_ft as i32;
+        // Standard transits spawn level at inbound altitude; do not auto-climb.
+        aircraft.target_altitude = current_level_ft as i32;
+        aircraft.auto_climb_to_cruise = false;
+        aircraft.ground_speed = if current_level_ft >= 20_000 {
+            420
+        } else if current_level_ft >= 10_000 {
+            300
+        } else {
+            250
+        };
+        aircraft.target_speed = aircraft.ground_speed;
+        aircraft.phase = FlightPhase::Cruise;
+
+        let first_controller = first_controller.trim();
+        let resolved_owner = self
+            .resolve_ownership(&aircraft)
+            .map(|decision| decision.owner_callsign);
+        let default_handoff_fix = aircraft
+            .route_fixes
+            .get((spawn_fix_index + 1).min(aircraft.route_fixes.len().saturating_sub(1)))
+            .cloned()
+            .unwrap_or_else(|| spawn_fix.clone());
+        let agreement = self
+            .agreement_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.resolve_internal_transit(departure, arrival, &aircraft.route_fixes));
+        let agreed_altitude_ft = agreement
+            .as_ref()
+            .and_then(|decision| decision.agreed_altitude_ft)
+            .unwrap_or(current_level_ft as i32);
+        let handoff_fix = agreement
+            .as_ref()
+            .and_then(|decision| decision.handoff_fix.clone())
+            .filter(|fix| self.nav_db.contains_key(fix))
+            .unwrap_or(default_handoff_fix);
+
+        if !first_controller.is_empty() && self.is_controller_online(first_controller) {
+            aircraft.set_assumed_by(Some(first_controller.to_string()));
+        } else {
+            let fallback_ai_owner = resolved_owner
+                .clone()
+                .filter(|owner| self.is_ai_controller(owner))
+                .or_else(|| self.ai_controllers.first().map(|controller| controller.callsign().to_string()));
+            if let Some(owner) = fallback_ai_owner {
+                aircraft.set_assumed_by(Some(owner.clone()));
+                if !first_controller.is_empty() {
+                    self.pending_transit_handoffs.insert(
+                        callsign.clone(),
+                        PendingTransitProfileHandoff {
+                            preferred_controller: first_controller.to_string(),
+                            handoff_fix: handoff_fix.clone(),
+                            agreed_altitude_ft: agreed_altitude_ft,
+                        },
+                    );
+                    info!(
+                        "[SIMULATOR] Transit {} fallback owner {} ({} offline), agreed {}ft at {}",
+                        callsign,
+                        owner,
+                        first_controller,
+                        agreed_altitude_ft,
+                        handoff_fix
+                    );
+                }
+            }
+        }
+
+        info!(
+            "[SIMULATOR] Spawned transit {} ({}) {} -> {} at FL{:03} via {}",
+            callsign,
+            aircraft.aircraft_type,
+            departure,
+            arrival,
+            current_level_ft / 100,
+            aircraft.current_fix().unwrap_or("route")
+        );
+
+        let flight_plan_str = aircraft.flight_plan.to_fsd_string();
+        self.login_pilot(&callsign, &aircraft_type, &squawk, &flight_plan_str).await?;
+
+        if let Some(pilot) = self.pilot_clients.get_mut(&callsign) {
+            pilot.send_position(
+                aircraft.latitude,
+                aircraft.longitude,
+                aircraft.altitude,
+                aircraft.ground_speed,
+                aircraft.heading,
+                &aircraft.squawk,
+            ).await?;
+        }
+
+        self.used_callsigns.insert(callsign.clone());
+
+        let bc_sender = aircraft
+            .assumed_by
+            .as_ref()
+            .filter(|owner| self.is_ai_controller(owner))
+            .cloned()
+            .or_else(|| resolved_owner.filter(|owner| self.is_ai_controller(owner)))
+            .or_else(|| self.ai_controllers.first().map(|controller| controller.callsign().to_string()));
+        if let Some(sender) = bc_sender {
+            let bc_message = format!("$CQ{}:@94835:BC:{}:{}", sender, callsign, squawk);
+            if !self.send_from_ai_controller(&sender, &bc_message) {
+                warn!("[SIMULATOR] Failed to queue BC message for {}", callsign);
+            }
+        }
+
+        self.aircraft.push(aircraft);
+        Ok(())
+    }
+
     /// Check and spawn transits
-    async fn check_transit_spawns(&self, timers: &mut [(usize, u64, u64)], loop_count: u64) -> Result<()> {
+    async fn check_transit_spawns(&mut self, timers: &mut [(usize, u64, u64)], loop_count: u64) -> Result<()> {
         for (idx, interval, last_spawn) in timers.iter_mut() {
             if loop_count - *last_spawn >= *interval {
                 *last_spawn = loop_count;
                 
                 if let Some(route) = self.scenario.random_transit_route(*idx) {
+                    let departure = route.departing.clone();
+                    let arrival = route.arriving.clone();
+                    let route_str = route.route.clone();
+                    let current_level = route.current_level;
+                    let cruise_level = route.cruise_level;
+                    let first_controller = route.first_controller.clone();
                     info!("[SIMULATOR] Spawning transit: {} -> {} at FL{:03} via {}", 
-                          route.departing, route.arriving, route.current_level / 100, route.route);
-                    // TODO: Create and spawn aircraft
+                          departure, arrival, current_level / 100, route_str);
+                    self.spawn_transit(
+                        &departure,
+                        &arrival,
+                        &route_str,
+                        current_level,
+                        cruise_level,
+                        &first_controller,
+                    ).await?;
                 }
             }
         }
