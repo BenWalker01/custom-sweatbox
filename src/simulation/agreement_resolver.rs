@@ -98,16 +98,18 @@ impl AgreementResolver {
             }
 
             let parts: Vec<&str> = trimmed.split(':').collect();
-            if parts.len() < 12 || !parts[0].eq_ignore_ascii_case("COPX") {
+            if parts.len() < 11 || !parts[0].eq_ignore_ascii_case("COPX") {
                 continue;
             }
 
             let departure_filter = parts[1].trim().to_uppercase();
-            let entry_fix_filter = parts[4].trim().to_uppercase();
-            let arrival_filter = parts[5].trim().to_uppercase();
-            let agreed_altitude_ft = parse_optional_altitude(parts[10]);
+            let entry_fix_filter = parts[3].trim().to_uppercase();
+            let arrival_filter = parts[4].trim().to_uppercase();
+            let agreed_altitude_ft = parts[8..=10]
+                .iter()
+                .find_map(|value| parse_optional_altitude(value));
 
-            let handoff_raw = parts[11].trim().to_uppercase();
+            let handoff_raw = parts[10].trim().to_uppercase();
             let handoff_fix = parse_fix_token(&handoff_raw).or_else(|| parse_fix_token(&entry_fix_filter));
 
             rules.push(AgreementRule {
@@ -130,10 +132,15 @@ impl AgreementRule {
         arrival: &str,
         route_fixes: &HashSet<String>,
     ) -> Option<i32> {
-        if !matches_filter(&self.departure_filter, departure) {
+        let departure_matches = matches_filter(&self.departure_filter, departure)
+            || route_fixes.contains(&self.departure_filter);
+        if !departure_matches {
             return None;
         }
-        if !matches_filter(&self.arrival_filter, arrival) {
+
+        let arrival_matches = matches_filter(&self.arrival_filter, arrival)
+            || route_fixes.contains(&self.arrival_filter);
+        if !arrival_matches {
             return None;
         }
 
@@ -144,9 +151,13 @@ impl AgreementRule {
         let mut score = 0;
         if self.departure_filter == departure {
             score += 4;
+        } else if route_fixes.contains(&self.departure_filter) {
+            score += 2;
         }
         if self.arrival_filter == arrival {
             score += 4;
+        } else if route_fixes.contains(&self.arrival_filter) {
+            score += 2;
         }
         if !is_wildcard(&self.entry_fix_filter) {
             score += 2;

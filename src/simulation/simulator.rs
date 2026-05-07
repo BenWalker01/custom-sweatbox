@@ -499,6 +499,20 @@ impl Simulator {
         self.is_ai_controller(callsign)
     }
 
+    fn select_transit_fallback_owner(&self, resolved_owner: Option<&String>) -> Option<String> {
+        if self.is_controller_online("LON_E_CTR") {
+            return Some("LON_E_CTR".to_string());
+        }
+
+        if let Some(owner) = resolved_owner.filter(|owner| self.is_ai_controller(owner)) {
+            return Some(owner.clone());
+        }
+
+        self.ai_controllers
+            .first()
+            .map(|controller| controller.callsign().to_string())
+    }
+
     fn send_from_ai_controller(&self, callsign: &str, message: &str) -> bool {
         let Some(controller) = self
             .ai_controllers
@@ -968,6 +982,49 @@ impl Simulator {
         Ok(())
     }
 
+    fn resolve_star_fixes(&self, destination: &str, star_name: &str) -> Result<Option<(Vec<String>, String)>> {
+        let Some(active_runway) = self.scenario.active_runway(destination).map(|r| r.to_string()) else {
+            return Ok(None);
+        };
+
+        let stars = load_stars(format!("data/Airports/{}", destination))?;
+        if stars.is_empty() {
+            return Ok(None);
+        }
+
+        let requested_star = star_name.trim().to_uppercase();
+        let Some((_, star_runways)) = stars.iter().find(|(name, _)| {
+            let normalized = name.trim_start_matches('#');
+            normalized.eq_ignore_ascii_case(&requested_star)
+        }) else {
+            return Ok(None);
+        };
+
+        let star_fixes_raw = if let Some(fixes) = star_runways
+            .iter()
+            .find(|(runway, _)| runway.eq_ignore_ascii_case(&active_runway))
+            .map(|(_, fixes)| fixes.clone())
+        {
+            fixes
+        } else if let Some((_, fixes)) = star_runways.iter().next() {
+            fixes.clone()
+        } else {
+            return Ok(None);
+        };
+
+        let star_fixes: Vec<String> = star_fixes_raw
+            .split_whitespace()
+            .filter(|token| !token.starts_with('#'))
+            .map(|token| token.to_uppercase())
+            .collect();
+
+        if star_fixes.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some((star_fixes, active_runway)))
+    }
+
     fn assign_star(&mut self, callsign: &str, star_name: &str, from_controller: &str) -> Result<()> {
         let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) else {
             return Ok(());
@@ -979,56 +1036,16 @@ impl Simulator {
         }
 
         let destination = self.aircraft[index].flight_plan.arrival.clone();
-        let Some(active_runway) = self.scenario.active_runway(&destination).map(|r| r.to_string()) else {
-            warn!("[SIMULATOR] No active runway for destination {} ({} STAR ignored)", destination, callsign);
-            return Ok(());
-        };
-
-        let stars = load_stars(format!("data/Airports/{}", destination))?;
-        if stars.is_empty() {
-            warn!("[SIMULATOR] No STAR data for {} ({} STAR {} ignored)", destination, callsign, star_name);
-            return Ok(());
-        }
-
         let requested_star = star_name.trim().to_uppercase();
-
-        let Some((_, star_runways)) = stars.iter().find(|(name, _)| {
-            let normalized = name.trim_start_matches('#');
-            normalized.eq_ignore_ascii_case(&requested_star)
-        }) else {
-            warn!("[SIMULATOR] STAR {} not found for {} ({} ignored)", requested_star, destination, callsign);
-            return Ok(());
-        };
-
-        let star_fixes_raw = if let Some(fixes) = star_runways
-            .iter()
-            .find(|(runway, _)| runway.eq_ignore_ascii_case(&active_runway))
-            .map(|(_, fixes)| fixes.clone())
-        {
-            fixes
-        } else if let Some((_, fixes)) = star_runways.iter().next() {
+        let Some((star_fixes, active_runway)) = self.resolve_star_fixes(&destination, &requested_star)? else {
             warn!(
-                "[SIMULATOR] STAR {} has no runway {} variant for {}; using first available variant",
+                "[SIMULATOR] STAR {} unavailable for {} ({} ignored)",
                 requested_star,
-                active_runway,
+                destination,
                 callsign
             );
-            fixes.clone()
-        } else {
-            warn!("[SIMULATOR] STAR {} has no usable fix list for {}", requested_star, callsign);
             return Ok(());
         };
-
-        let star_fixes: Vec<String> = star_fixes_raw
-            .split_whitespace()
-            .filter(|token| !token.starts_with('#'))
-            .map(|token| token.to_uppercase())
-            .collect();
-
-        if star_fixes.is_empty() {
-            warn!("[SIMULATOR] STAR {} resolved to no fixes for {}", requested_star, callsign);
-            return Ok(());
-        }
 
         let aircraft = &mut self.aircraft[index];
         let added = aircraft.append_route_fixes(star_fixes);
@@ -1455,6 +1472,35 @@ impl Simulator {
             0,
         );
 
+        // For arrivals/transits, route strings often end with STAR names
+        // (e.g. LOGAN2H) that are not direct fixes. Expand these into
+        // waypoint sequences so aircraft do not terminate at the STAR entry.
+        if let Some(last_token) = route.split_whitespace().last() {
+            let star_candidate = last_token
+                .split('/')
+                .next()
+                .unwrap_or(last_token)
+                .trim()
+                .to_uppercase();
+
+            if star_candidate.chars().any(|c| c.is_ascii_alphabetic())
+                && star_candidate.chars().any(|c| c.is_ascii_digit())
+            {
+                if let Some((star_fixes, active_runway)) = self.resolve_star_fixes(arrival, &star_candidate)? {
+                    let added = aircraft.append_route_fixes(star_fixes);
+                    if added > 0 {
+                        info!(
+                            "[SIMULATOR] {} transit STAR {} appended {} fixes for runway {}",
+                            callsign,
+                            star_candidate,
+                            added,
+                            active_runway
+                        );
+                    }
+                }
+            }
+        }
+
         let Some(spawn_fix_index) = aircraft
             .route_fixes
             .iter()
@@ -1524,10 +1570,7 @@ impl Simulator {
         if !first_controller.is_empty() && self.is_controller_online(first_controller) {
             aircraft.set_assumed_by(Some(first_controller.to_string()));
         } else {
-            let fallback_ai_owner = resolved_owner
-                .clone()
-                .filter(|owner| self.is_ai_controller(owner))
-                .or_else(|| self.ai_controllers.first().map(|controller| controller.callsign().to_string()));
+            let fallback_ai_owner = self.select_transit_fallback_owner(resolved_owner.as_ref());
             if let Some(owner) = fallback_ai_owner {
                 aircraft.set_assumed_by(Some(owner.clone()));
                 if !first_controller.is_empty() {
