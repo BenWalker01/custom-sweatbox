@@ -1,0 +1,8 @@
+COPX:*:*:AVTIC:EGNT:*:London S5:Sector 29:*:28000:AVTIC
+COPX:*:*:AVTIC:EGNV:*:London S5:Sector 29:*:28000:AVTIC
+COPX:*:*:AVTIC:EGNJ:*:London S5:Sector 29:*:28000:AVTIC
+
+COPX:EGGD:*:AVTIC:*:*:London S5:Sector 29:28000:*:AVTIC
+COPX:EGFF:*:AVTIC:*:*:London S5:Sector 29:28000:*:AVTIC
+COPX:EGSY:*:AVTIC:*:*:London S5:Sector 29:28000:*:AVTIC
+COPX:EGTE:*:AVTIC:*:*:London S5:Sector 29:28000:*:AVTIC

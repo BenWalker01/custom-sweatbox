@@ -1,0 +1,27 @@
+COPX:EGLL:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGWU:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGKK:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGGW:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGSC:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGLC:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGKB:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGMC:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGTO:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGLF:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGLK:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGTF:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGVO:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGTD:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGHL:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGHI:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+COPX:EGHH:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA
+
+COPX:EGSS:*:BIBPE:*:*:London S23:London S5:26000:*:^BIBPE
+
+COPX:EGBB:*:OZZIL:*:*:London S23:London S5:26000:*:^OZZIL
+COPX:EGBB:*:FELCA:*:*:London S23:London S5:26000:*:^FELCA

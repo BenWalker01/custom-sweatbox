@@ -1,0 +1,1 @@
+FIR_COPX:*:*:ENJEX:EIWF:*:London S8:Shannon Low South:*:18000:|ENJEX

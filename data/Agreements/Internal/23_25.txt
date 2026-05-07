@@ -1,0 +1,2 @@
+COPX:EGFF:*:ELSOF:*:*:London S23:London S25:25000:*:ELSOF
+COPX:EGSY:*:ELSOF:*:*:London S23:London S25:25000:*:ELSOF

@@ -1,0 +1,103 @@
+;COP - BANBA
+COPX:EGLL:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGWU:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+COPX:EGKK:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+COPX:EGSS:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGGW:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGSC:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+COPX:EGLC:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGKB:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGMC:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGTO:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+COPX:EGLF:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGLK:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGTF:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGVO:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGTD:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGLD:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGHL:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+COPX:EGHI:*:*:BANBA:*:London S5:London S8:34000:*:^
+COPX:EGHH:*:*:BANBA:*:London S5:London S8:34000:*:^
+
+;COP - BAKUR
+COPX:EGLL:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGWU:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+COPX:EGKK:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+COPX:EGSS:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGGW:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGSC:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+COPX:EGLC:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGKB:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGMC:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGTO:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+COPX:EGLF:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGLK:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGTF:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGVO:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGTD:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGLD:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGHL:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+COPX:EGHI:*:*:BAKUR:*:London S5:London S8:34000:*:^
+COPX:EGHH:*:*:BAKUR:*:London S5:London S8:34000:*:^
+
+;COP - VATRY
+COPX:EGLL:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGWU:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+COPX:EGKK:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+COPX:EGSS:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGGW:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGSC:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+COPX:EGLC:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGKB:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGMC:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGTO:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+COPX:EGLF:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGLK:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGTF:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGVO:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGTD:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGLD:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGHL:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+COPX:EGHI:*:*:VATRY:*:London S5:London S8:34000:*:^
+COPX:EGHH:*:*:VATRY:*:London S5:London S8:34000:*:^
+
+;COP - LIPGO
+COPX:EGLL:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGWU:*:*:LIPGO:*:London S5:London S8:34000:*:^
+
+COPX:EGKK:*:*:LIPGO:*:London S5:London S8:34000:*:^
+
+COPX:EGSS:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGGW:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGSC:*:*:LIPGO:*:London S5:London S8:34000:*:^
+
+COPX:EGLC:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGKB:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGMC:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGTO:*:*:LIPGO:*:London S5:London S8:34000:*:^
+
+COPX:EGLF:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGLK:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGTF:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGVO:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGTD:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGLD:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGHL:*:*:LIPGO:*:London S5:London S8:34000:*:^
+
+COPX:EGHI:*:*:LIPGO:*:London S5:London S8:34000:*:^
+COPX:EGHH:*:*:LIPGO:*:London S5:London S8:34000:*:^

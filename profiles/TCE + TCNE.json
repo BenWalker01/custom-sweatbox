@@ -89,7 +89,7 @@
             ]
         },
         {
-            "interval": 180,
+            "interval": 20,
             "routes": [
                 {"departing": "EBBR", "arriving": "EGLL", "currentLevel": 29000, "cruiseLevel": 36000, "route": "ABNED DCT IBNOS DCT LOGAN LOGAN2H", "firstController": "LON_E_CTR"},
                 {"departing": "EBBR", "arriving": "EGLL", "currentLevel": 29000, "cruiseLevel": 36000, "route": "NOGRO DCT LUSOR DCT RINIS DCT LOGAN LOGAN2H", "firstController": "LON_E_CTR"},

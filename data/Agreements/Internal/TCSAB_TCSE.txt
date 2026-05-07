@@ -1,0 +1,3 @@
+COPX:*:*:ABTUM:EGKK:*:London TC SABER:London TC SE:*:14000:ABTUM
+
+COPX:*:*:TANET:EGLL:*:London TC SABER:London TC SE:*:*:TANET

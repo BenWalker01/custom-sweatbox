@@ -1,0 +1,3 @@
+FIR_COPX:*:*:TOPPA:*:*:EDYY Delta:Humber:*:*:TOPPA
+
+FIR_COPX:*:*:GODOS:*:*:EDYY Delta:Humber:*:*:GODOS

@@ -1,0 +1,6 @@
+COPX:*:*:ICTAM:EGFF:*:London S25:London S23:*:26000:ICTAM
+COPX:*:*:ICTAM:EGSY:*:London S25:London S23:*:26000:ICTAM
+
+COPX:*:*:ICTAM:EGGD:*:London S25:London S23:*:22000:ICTAM
+
+COPX:EGSS:*:OKSAW:*:*:London S25:London S23:26000:*:^OKSAW
