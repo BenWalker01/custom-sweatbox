@@ -1,0 +1,36 @@
+{
+    "activeAerodromes": ["EGKK"],
+    "activeRunways": {
+        "EGKK": "08R"
+    },
+    "activeControllers": ["EGKK_APP", "EGKK_F_APP"],
+    "masterController": "LON_E_CTR",
+    "masterControllerFreq": "18480",
+    "otherControllers": [
+        ["LON_D_CTR", "34905"],
+        ["LTC_SE_CTR", "20530"]
+    ],
+    "stdTransits": [
+        {
+            "interval": 90,
+            "routes": [
+                {
+                    "departing": "EHAM",
+                    "arriving": "EGKK",
+                    "currentLevel": 9000,
+                    "cruiseLevel": 12000,
+                    "route": "LARCK DCT TIMBA",
+                    "firstController": "EGKK_APP"
+                },
+                {
+                    "departing": "EHAM",
+                    "arriving": "EGKK",
+                    "currentLevel": 9000,
+                    "cruiseLevel": 12000,
+                    "route": "TUFOZ DCT HOLLY DCT WILLO",
+                    "firstController": "EGKK_APP"
+                }
+            ]
+        }
+    ]
+}
