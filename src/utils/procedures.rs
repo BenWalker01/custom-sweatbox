@@ -1,7 +1,7 @@
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use anyhow::{Result, Context};
 
 pub type ProcedureDatabase = HashMap<String, HashMap<String, String>>;
 
@@ -9,7 +9,7 @@ pub type ProcedureDatabase = HashMap<String, HashMap<String, String>>;
 /// Format: SID:ICAO:RUNWAY:SIDNAME:FIXES...
 pub fn load_sids<P: AsRef<Path>>(airport_dir: P) -> Result<ProcedureDatabase> {
     let sids_file = airport_dir.as_ref().join("Sids.txt");
-    
+
     if !sids_file.exists() {
         return Ok(HashMap::new());
     }
@@ -45,7 +45,7 @@ pub fn load_sids<P: AsRef<Path>>(airport_dir: P) -> Result<ProcedureDatabase> {
 /// Format: STAR:ICAO:RUNWAY:STARNAME:FIXES...
 pub fn load_stars<P: AsRef<Path>>(airport_dir: P) -> Result<ProcedureDatabase> {
     let stars_file = airport_dir.as_ref().join("Stars.txt");
-    
+
     if !stars_file.exists() {
         return Ok(HashMap::new());
     }
@@ -68,7 +68,8 @@ pub fn load_stars<P: AsRef<Path>>(airport_dir: P) -> Result<ProcedureDatabase> {
             let runway = parts[2].to_string();
             let fixes = parts[4].to_string();
 
-            stars.entry(star_name)
+            stars
+                .entry(star_name)
                 .or_insert_with(HashMap::new)
                 .insert(runway, fixes);
         }
@@ -101,7 +102,7 @@ mod tests {
     #[test]
     fn test_load_egll_sids() -> Result<()> {
         let sids = load_sids("data/Airports/EGLL")?;
-        
+
         // Check BPK5K SID exists for runway 09L
         if let Some(bpk5k) = sids.get("BPK5K") {
             if let Some(fixes) = bpk5k.get("09L") {
@@ -117,7 +118,7 @@ mod tests {
     #[test]
     fn test_load_egll_stars() -> Result<()> {
         let stars = load_stars("data/Airports/EGLL")?;
-        
+
         // Check ALESO1H STAR exists
         if let Some(aleso) = stars.get("ALESO1H") {
             if let Some(fixes) = aleso.get("27R") {

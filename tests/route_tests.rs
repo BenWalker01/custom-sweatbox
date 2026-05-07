@@ -11,7 +11,7 @@ fn test_route_with_sid() {
 
     println!("Route string: {}", route.route_string);
     println!("Fixes: {:?}", route.fixes);
-    
+
     // BPK5K/09L should expand to: RW27R D110B D070J D196J D196F BAPAG BPK
     // Then followed by: DVR UL9 KONAN
     assert!(route.fixes.len() > 0);
@@ -30,7 +30,7 @@ fn test_route_with_star() {
 
     println!("Route string: {}", route.route_string);
     println!("Fixes: {:?}", route.fixes);
-    
+
     // ALESO1H/27R should expand to: ALESO ROTNO ETVAX TIGER LLE01 BIG CF27R FI27R RW27R
     assert!(route.fixes.len() > 0);
     assert!(route.fixes.contains(&"ALESO".to_string()));
@@ -49,18 +49,18 @@ fn test_route_with_sid_and_star() {
 
     println!("Route string: {}", route.route_string);
     println!("Fixes: {:?}", route.fixes);
-    
+
     // Should have both SID and STAR expanded
     assert!(route.fixes.len() > 0);
-    
+
     // Check SID fixes
     assert!(route.fixes.contains(&"BPK".to_string()));
     assert!(route.fixes.contains(&"BAPAG".to_string()));
-    
+
     // Check STAR fixes
     assert!(route.fixes.contains(&"ALESO".to_string()));
     assert!(route.fixes.contains(&"TIGER".to_string()));
-    
+
     // Check intermediate waypoints
     assert!(route.fixes.contains(&"DVR".to_string()));
     assert!(route.fixes.contains(&"KONAN".to_string()));
@@ -77,7 +77,7 @@ fn test_route_without_procedures() {
 
     println!("Route string: {}", route.route_string);
     println!("Fixes: {:?}", route.fixes);
-    
+
     assert!(route.fixes.contains(&"DVR".to_string()));
     assert!(route.fixes.contains(&"KONAN".to_string()));
     assert!(route.fixes.contains(&"TALLA".to_string()));

@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct AgreementDecision {
     pub agreed_altitude_ft: Option<i32>,
     pub handoff_fix: Option<String>,
+    pub matched_rule: String,
+    pub matched_source: String,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +23,9 @@ struct AgreementRule {
     entry_fix_filter: String,
     agreed_altitude_ft: Option<i32>,
     handoff_fix: Option<String>,
+    source_file: String,
+    source_line: usize,
+    raw_rule: String,
 }
 
 impl AgreementResolver {
@@ -76,7 +81,10 @@ impl AgreementResolver {
                 continue;
             };
 
-            if best.as_ref().is_none_or(|(_, best_score)| score > *best_score) {
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_score)| score > *best_score)
+            {
                 best = Some((rule, score));
             }
         }
@@ -84,6 +92,8 @@ impl AgreementResolver {
         best.map(|(rule, _)| AgreementDecision {
             agreed_altitude_ft: rule.agreed_altitude_ft,
             handoff_fix: rule.handoff_fix.clone(),
+            matched_rule: rule.raw_rule.clone(),
+            matched_source: format!("{}:{}", rule.source_file, rule.source_line),
         })
     }
 
@@ -91,7 +101,7 @@ impl AgreementResolver {
         let content = fs::read_to_string(path)?;
         let mut rules = Vec::new();
 
-        for line in content.lines() {
+        for (line_index, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with(';') {
                 continue;
@@ -110,7 +120,8 @@ impl AgreementResolver {
                 .find_map(|value| parse_optional_altitude(value));
 
             let handoff_raw = parts[10].trim().to_uppercase();
-            let handoff_fix = parse_fix_token(&handoff_raw).or_else(|| parse_fix_token(&entry_fix_filter));
+            let handoff_fix =
+                parse_fix_token(&handoff_raw).or_else(|| parse_fix_token(&entry_fix_filter));
 
             rules.push(AgreementRule {
                 departure_filter,
@@ -118,6 +129,9 @@ impl AgreementResolver {
                 entry_fix_filter,
                 agreed_altitude_ft,
                 handoff_fix,
+                source_file: path.display().to_string(),
+                source_line: line_index + 1,
+                raw_rule: trimmed.to_string(),
             });
         }
 

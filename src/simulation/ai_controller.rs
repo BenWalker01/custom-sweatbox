@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
-use tokio::net::TcpStream;
+use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// AI Controller client that connects to the FSD server
 pub struct AiController {
@@ -20,13 +20,7 @@ pub struct AiController {
 
 impl AiController {
     /// Create a new AI controller
-    pub fn new(
-        callsign: String,
-        freq: String,
-        latitude: f64,
-        longitude: f64,
-        range: u32,
-    ) -> Self {
+    pub fn new(callsign: String, freq: String, latitude: f64, longitude: f64, range: u32) -> Self {
         Self {
             stream: None,
             tx: None,
@@ -43,14 +37,17 @@ impl AiController {
 
     /// Connect to the FSD server
     pub async fn connect(&mut self, server_addr: &str) -> Result<()> {
-        info!("[AI CONTROLLER] Connecting to FSD server at {}", server_addr);
-        
+        info!(
+            "[AI CONTROLLER] Connecting to FSD server at {}",
+            server_addr
+        );
+
         let stream = TcpStream::connect(server_addr)
             .await
             .context(format!("Failed to connect to {}", server_addr))?;
-        
+
         self.stream = Some(stream);
-        
+
         info!("[AI CONTROLLER] Connected to FSD server");
         Ok(())
     }
@@ -76,7 +73,7 @@ impl AiController {
         );
 
         self.send_raw(&login_message).await?;
-        
+
         info!("[AI CONTROLLER] Login message sent for {}", self.callsign);
 
         // Wait for server response
@@ -85,8 +82,11 @@ impl AiController {
         // Send initial position update
         self.send_position_update().await?;
 
-        info!("[AI CONTROLLER] {} logged in successfully on {}", self.callsign, self.freq);
-        
+        info!(
+            "[AI CONTROLLER] {} logged in successfully on {}",
+            self.callsign, self.freq
+        );
+
         Ok(())
     }
 
@@ -95,16 +95,12 @@ impl AiController {
         // FSD controller position format: %<callsign>:<frequency>:<facilitytype>:<visrange>:<rating>:<lat>:<lon>:<elevation>
         let position_message = format!(
             "%{}:{}:4:{}:5:{}:{}:0\r\n",
-            self.callsign,
-            self.freq,
-            self.range,
-            self.latitude,
-            self.longitude
+            self.callsign, self.freq, self.range, self.latitude, self.longitude
         );
 
         self.send_raw(&position_message).await?;
         debug!("[AI CONTROLLER] Position update sent for {}", self.callsign);
-        
+
         Ok(())
     }
 
@@ -131,14 +127,17 @@ impl AiController {
     ///
     /// When `capture_incoming` is true, incoming raw FSD messages are forwarded
     /// to the returned receiver for higher-level processing by the simulator.
-    pub async fn start_message_loop(&mut self, capture_incoming: bool) -> Result<Option<mpsc::UnboundedReceiver<String>>> {
+    pub async fn start_message_loop(
+        &mut self,
+        capture_incoming: bool,
+    ) -> Result<Option<mpsc::UnboundedReceiver<String>>> {
         if self.stream.is_none() {
             return Err(anyhow::anyhow!("Not connected to server"));
         }
 
         let stream = self.stream.take().unwrap();
         let (mut read_half, mut write_half) = stream.into_split();
-        
+
         let callsign = self.callsign.clone();
         let callsign_write = callsign.clone();
         let callsign_periodic = callsign.clone();
@@ -177,7 +176,7 @@ impl AiController {
         // Spawn a task to handle incoming messages
         tokio::spawn(async move {
             let mut buffer = vec![0u8; 8192];
-            
+
             loop {
                 match read_half.read(&mut buffer).await {
                     Ok(0) => {
@@ -211,17 +210,20 @@ impl AiController {
         let tx_periodic = tx;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let position_message = format!(
                     "%{}:{}:4:{}:5:{}:{}:0\r\n",
                     callsign_periodic, freq, range, latitude, longitude
                 );
-                
+
                 if tx_periodic.send(position_message).is_err() {
-                    debug!("[AI CONTROLLER] Position update channel closed for {}", callsign_periodic);
+                    debug!(
+                        "[AI CONTROLLER] Position update channel closed for {}",
+                        callsign_periodic
+                    );
                     break;
                 }
             }
@@ -234,7 +236,9 @@ impl AiController {
     ///
     /// The trailing CRLF is added automatically when missing.
     pub fn send_message(&self, message: &str) -> Result<()> {
-        let tx = self.tx.as_ref()
+        let tx = self
+            .tx
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Controller message loop is not running"))?;
 
         let mut payload = message.to_string();
@@ -249,19 +253,19 @@ impl AiController {
     /// Disconnect from the server
     pub async fn disconnect(&mut self) -> Result<()> {
         info!("[AI CONTROLLER] Disconnecting {}", self.callsign);
-        
+
         // Send disconnect message through channel if available
         if let Some(tx) = &self.tx {
             let disconnect_msg = format!("#DA{}:SERVER\r\n", self.callsign);
             let _ = tx.send(disconnect_msg);
-            
+
             // Give it time to send
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        
+
         // Drop the channel sender to close the write loop
         self.tx = None;
-        
+
         Ok(())
     }
 
@@ -279,7 +283,10 @@ impl AiController {
 impl Drop for AiController {
     fn drop(&mut self) {
         if self.tx.is_some() {
-            warn!("[AI CONTROLLER] {} dropped without proper disconnect", self.callsign);
+            warn!(
+                "[AI CONTROLLER] {} dropped without proper disconnect",
+                self.callsign
+            );
         }
     }
 }

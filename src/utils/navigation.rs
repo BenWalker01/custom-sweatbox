@@ -1,8 +1,8 @@
+use anyhow::{Context, Result};
 /// Navigation utilities and calculations
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use anyhow::{Result, Context};
 
 const EARTH_RADIUS_KM: f64 = 6372.8;
 const EARTH_RADIUS_NM: f64 = 3440.065;
@@ -15,8 +15,8 @@ pub fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let lat1_rad = lat1.to_radians();
     let lat2_rad = lat2.to_radians();
 
-    let a = (dlat / 2.0).sin().powi(2)
-        + lat1_rad.cos() * lat2_rad.cos() * (dlon / 2.0).sin().powi(2);
+    let a =
+        (dlat / 2.0).sin().powi(2) + lat1_rad.cos() * lat2_rad.cos() * (dlon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().asin();
 
     EARTH_RADIUS_KM * c
@@ -30,20 +30,13 @@ pub fn heading_from_to(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -
     let dlon = to_lon - from_lon;
     let y = dlon.to_radians().sin() * to_lat.to_radians().cos();
     let x = from_lat.to_radians().cos() * to_lat.to_radians().sin()
-        - from_lat.to_radians().sin()
-            * to_lat.to_radians().cos()
-            * dlon.to_radians().cos();
+        - from_lat.to_radians().sin() * to_lat.to_radians().cos() * dlon.to_radians().cos();
 
     let bearing = y.atan2(x).to_degrees();
     ((bearing + 360.0) % 360.0) as i32
 }
 
-pub fn position_bearing_distance(
-    lat: f64,
-    lon: f64,
-    bearing: f64,
-    distance_nm: f64,
-) -> (f64, f64) {
+pub fn position_bearing_distance(lat: f64, lon: f64, bearing: f64, distance_nm: f64) -> (f64, f64) {
     let lat_rad = lat.to_radians();
     let lon_rad = lon.to_radians();
     let bearing_rad = bearing.to_radians();
@@ -113,8 +106,9 @@ pub fn sf_coords_to_decimal(lat: &str, lon: &str) -> Result<(f64, f64)> {
         let seconds: f64 = parts[2].parse()?;
         let milliseconds: f64 = parts[3].parse()?;
 
-        let mut decimal = degrees + (minutes / 60.0) + (seconds / 3600.0) + (milliseconds / 3_600_000.0);
-        
+        let mut decimal =
+            degrees + (minutes / 60.0) + (seconds / 3600.0) + (milliseconds / 3_600_000.0);
+
         if hemisphere == "S" || hemisphere == "W" {
             decimal *= -1.0;
         }
@@ -137,17 +131,17 @@ fn parse_fixes_file<P: AsRef<Path>>(path: P) -> Result<FixDatabase> {
 
     for line in content.lines() {
         let line = line.trim();
-        
+
         // Skip comments and empty lines
         if line.is_empty() || line.starts_with(';') {
             continue;
         }
 
         let parts: Vec<&str> = line.split_whitespace().collect();
-        
+
         if parts.len() >= 3 {
             let fix_name = parts[0].to_string();
-            
+
             // Handle both fix format and VOR/NDB format
             let (lat, lon) = if parts.len() == 3 {
                 // Fix format: NAME LAT LON
@@ -155,9 +149,13 @@ fn parse_fixes_file<P: AsRef<Path>>(path: P) -> Result<FixDatabase> {
             } else {
                 // VOR/NDB format: NAME FREQ LAT LON or similar
                 // Try to find the coordinate parts
-                let lat_idx = parts.iter().position(|&p| p.starts_with('N') || p.starts_with('S'));
-                let lon_idx = parts.iter().position(|&p| p.starts_with('E') || p.starts_with('W'));
-                
+                let lat_idx = parts
+                    .iter()
+                    .position(|&p| p.starts_with('N') || p.starts_with('S'));
+                let lon_idx = parts
+                    .iter()
+                    .position(|&p| p.starts_with('E') || p.starts_with('W'));
+
                 if let (Some(lat_i), Some(lon_i)) = (lat_idx, lon_idx) {
                     (parts[lat_i], parts[lon_i])
                 } else {
@@ -177,34 +175,40 @@ fn parse_fixes_file<P: AsRef<Path>>(path: P) -> Result<FixDatabase> {
 /// Parse airport basic data files to get airport reference points
 fn parse_airports<P: AsRef<Path>>(airports_dir: P) -> Result<FixDatabase> {
     let mut airports = HashMap::new();
-    
-    let entries = fs::read_dir(airports_dir.as_ref())
-        .with_context(|| format!("Failed to read airports directory: {:?}", airports_dir.as_ref()))?;
+
+    let entries = fs::read_dir(airports_dir.as_ref()).with_context(|| {
+        format!(
+            "Failed to read airports directory: {:?}",
+            airports_dir.as_ref()
+        )
+    })?;
 
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_dir() {
-            let airport_code = path.file_name()
+            let airport_code = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
 
             let basic_file = path.join("Basic.txt");
-            
+
             if basic_file.exists() {
                 if let Ok(content) = fs::read_to_string(&basic_file) {
                     let lines: Vec<&str> = content.lines().collect();
-                    
+
                     // Line 0: Airport name
                     // Line 1: Coordinates
                     // Line 2: Frequency
                     if lines.len() >= 2 {
                         let coord_parts: Vec<&str> = lines[1].split_whitespace().collect();
-                        
+
                         if coord_parts.len() >= 2 {
-                            if let Ok(coords) = sf_coords_to_decimal(coord_parts[0], coord_parts[1]) {
+                            if let Ok(coords) = sf_coords_to_decimal(coord_parts[0], coord_parts[1])
+                            {
                                 airports.insert(airport_code, coords);
                             }
                         }
@@ -272,7 +276,7 @@ pub fn load_navigation_data<P: AsRef<Path>>(data_dir: P) -> Result<FixDatabase> 
         if let Ok(airports) = parse_airports(&airports_dir) {
             all_fixes.extend(airports);
         }
-        
+
         // Load SID waypoints from airport folders
         if let Ok(sid_fixes) = parse_sid_waypoints(&airports_dir) {
             all_fixes.extend(sid_fixes);
@@ -285,18 +289,22 @@ pub fn load_navigation_data<P: AsRef<Path>>(data_dir: P) -> Result<FixDatabase> 
 /// Parse SID waypoints from airport folders
 fn parse_sid_waypoints<P: AsRef<Path>>(airports_dir: P) -> Result<FixDatabase> {
     let mut waypoints = HashMap::new();
-    
-    let entries = fs::read_dir(airports_dir.as_ref())
-        .with_context(|| format!("Failed to read airports directory: {:?}", airports_dir.as_ref()))?;
+
+    let entries = fs::read_dir(airports_dir.as_ref()).with_context(|| {
+        format!(
+            "Failed to read airports directory: {:?}",
+            airports_dir.as_ref()
+        )
+    })?;
 
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        
+
         if path.is_dir() {
             // Load the Fixes.txt file from each airport folder
             let fixes_file = path.join("Fixes.txt");
-            
+
             if fixes_file.exists() {
                 if let Ok(fixes) = parse_fixes_file(&fixes_file) {
                     waypoints.extend(fixes);

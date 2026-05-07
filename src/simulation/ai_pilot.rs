@@ -1,7 +1,7 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt};
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// AI Pilot client that connects to the FSD server
 pub struct AiPilot {
@@ -22,14 +22,17 @@ impl AiPilot {
 
     /// Connect to the FSD server
     pub async fn connect(&mut self, server_addr: &str) -> Result<()> {
-        debug!("[AI PILOT] {} connecting to FSD server at {}", self.callsign, server_addr);
-        
+        debug!(
+            "[AI PILOT] {} connecting to FSD server at {}",
+            self.callsign, server_addr
+        );
+
         let stream = TcpStream::connect(server_addr)
             .await
             .context(format!("Failed to connect to {}", server_addr))?;
-        
+
         self.stream = Some(stream);
-        
+
         debug!("[AI PILOT] {} connected to FSD server", self.callsign);
         Ok(())
     }
@@ -43,8 +46,7 @@ impl AiPilot {
         // FSD pilot login format: #AP<callsign>:<server>:<cid>:<password>:<rating>:<protocol>:<simulator>:<realname>
         let login_message = format!(
             "#AP{}:SERVER:{}:123456:1:100:1:AI Pilot\r\n",
-            self.callsign,
-            self.cid
+            self.callsign, self.cid
         );
 
         self.send_raw(&login_message).await?;
@@ -60,33 +62,29 @@ impl AiPilot {
     }
 
     /// Send a position update
-    pub async fn send_position(&mut self, 
-        lat: f64, 
-        lon: f64, 
-        altitude: i32, 
-        ground_speed: u32, 
+    pub async fn send_position(
+        &mut self,
+        lat: f64,
+        lon: f64,
+        altitude: i32,
+        ground_speed: u32,
         heading: i32,
-        squawk: &str
+        squawk: &str,
     ) -> Result<()> {
         // FSD pilot position format: @<transponder flag>:<callsign>:<squawk code>:1:<latitude>:<longitude>:<altitude>:0:<heading>:0
         // Heading encoding: ((heading * 2.88 + 0.5) * 4) as integer
         // Use @N for Mode C (altitude reporting)
         let encoded_heading = ((heading as f64 * 2.88 + 0.5) * 4.0) as i32;
-        
+
         let position_message = format!(
             "@N:{}:{}:1:{:.6}:{:.6}:{}:0:{}:0\r\n",
-            self.callsign,
-            squawk,
-            lat,
-            lon,
-            altitude,
-            encoded_heading
+            self.callsign, squawk, lat, lon, altitude, encoded_heading
         );
 
         self.send_raw(&position_message).await?;
         debug!("[AI PILOT] Position update sent for {}: lat={:.6}, lon={:.6}, alt={}, spd={}, hdg={} (encoded={})", 
                self.callsign, lat, lon, altitude, ground_speed, heading, encoded_heading);
-        
+
         Ok(())
     }
 
@@ -115,10 +113,10 @@ impl AiPilot {
             let disconnect_msg = format!("#DP{}\r\n", self.callsign);
             stream.write_all(disconnect_msg.as_bytes()).await?;
             stream.flush().await?;
-            
+
             stream.shutdown().await?;
         }
-        
+
         Ok(())
     }
 
@@ -131,7 +129,10 @@ impl AiPilot {
 impl Drop for AiPilot {
     fn drop(&mut self) {
         if self.stream.is_some() {
-            warn!("[AI PILOT] {} dropped without proper disconnect", self.callsign);
+            warn!(
+                "[AI PILOT] {} dropped without proper disconnect",
+                self.callsign
+            );
         }
     }
 }

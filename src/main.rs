@@ -1,21 +1,20 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
 use std::sync::Arc;
+use tracing::{info, Level};
 
-mod server;
-mod utils;
+mod aircraft;
 mod config;
 mod scenario;
+mod server;
 mod simulation;
-mod aircraft;
+mod utils;
 
-use utils::navigation::load_navigation_data;
-use utils::performance::load_performance_data;
-use config::{SimulationConfig, FleetConfig};
+use config::{FleetConfig, SimulationConfig};
 use scenario::Scenario;
 use simulation::Simulator;
-
+use utils::navigation::load_navigation_data;
+use utils::performance::load_performance_data;
 
 #[derive(Parser)]
 #[command(name = "custom-sweatbox")]
@@ -41,7 +40,7 @@ enum Commands {
 
         #[arg(short, long)]
         profile: Option<String>,
-    }
+    },
 }
 
 #[tokio::main]
@@ -61,12 +60,9 @@ async fn main() -> Result<()> {
             fsd_server.start().await?;
         }
 
-        Commands::Simulator {
-            server,
-            profile,
-        } => {
+        Commands::Simulator { server, profile } => {
             info!("Starting Simulator connecting to {}", server);
-            
+
             // Load navigation data
             info!("Loading navigation data...");
             let fix_db = match load_navigation_data("data") {
@@ -79,7 +75,7 @@ async fn main() -> Result<()> {
                     return Err(e.into());
                 }
             };
-            
+
             // Load performance data
             info!("Loading aircraft performance data...");
             let perf_db = match load_performance_data("data/AircraftPerformace.txt") {
@@ -92,11 +88,11 @@ async fn main() -> Result<()> {
                     return Err(e.into());
                 }
             };
-            
+
             // Load profile
             let profile_path = profile.unwrap_or_else(|| "profiles/TCE + TCNE.json".to_string());
             info!("Loading simulation profile: {}", profile_path);
-            
+
             // Load scenario using the new parser
             let scenario = Scenario::load(&profile_path)?;
             let stats = scenario.statistics();
@@ -107,37 +103,32 @@ async fn main() -> Result<()> {
             let fleet_config = FleetConfig::default();
 
             // Create simulator
-            let mut simulator = Simulator::new(
-                scenario,
-                sim_config,
-                fleet_config,
-                fix_db,
-                perf_db,
-                server,
-            );
+            let mut simulator =
+                Simulator::new(scenario, sim_config, fleet_config, fix_db, perf_db, server);
 
             // Initialize and run simulation
             info!("Initializing simulation...");
             simulator.initialize().await?;
-            
+
             info!("Starting simulation...");
-            
+
             // Create shutdown channel
             let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-            
+
             // Setup Ctrl+C handler
             ctrlc::set_handler(move || {
                 info!("Received Ctrl+C, stopping simulation...");
                 let _ = shutdown_tx.send(());
-            }).expect("Error setting Ctrl-C handler");
-            
+            })
+            .expect("Error setting Ctrl-C handler");
+
             // Run simulation loop
             simulator.run(shutdown_rx).await?;
-            
+
             // Stop simulation
             info!("Stopping simulation...");
             simulator.stop().await?;
-            
+
             info!("Simulation stopped cleanly");
         }
     }

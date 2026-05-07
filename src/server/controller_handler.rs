@@ -1,10 +1,12 @@
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
-use super::message_handler::{MessageHandler, MessageStatus, ClientType, es_convert, parse_message};
+use super::message_handler::{
+    es_convert, parse_message, ClientType, MessageHandler, MessageStatus,
+};
 
 /// Handler for controller connections
 pub struct ControllerHandler {
@@ -49,7 +51,7 @@ impl ControllerHandler {
 impl MessageHandler for ControllerHandler {
     fn handle(&mut self, message: &str) -> Result<MessageStatus> {
         let parts = parse_message(message);
-        
+
         if parts.is_empty() {
             return Ok(MessageStatus::Handled);
         }
@@ -70,11 +72,7 @@ impl MessageHandler for ControllerHandler {
                 let callsign = self.callsign.clone();
                 let stream = self.stream.clone();
                 tokio::spawn(async move {
-                    let msg_parts = vec![
-                        "#TMserver",
-                        &callsign,
-                        "Custom FSD server",
-                    ];
+                    let msg_parts = vec!["#TMserver", &callsign, "Custom FSD server"];
                     let data = es_convert(&msg_parts);
                     if let Ok(_) = stream.lock().await.try_write(&data) {
                         // Message sent
@@ -105,19 +103,13 @@ impl MessageHandler for ControllerHandler {
                         let stream = self.stream.clone();
                         tokio::spawn(async move {
                             let cr_msg = format!("$CR{}", server);
-                            let msg_parts = vec![
-                                cr_msg.as_str(),
-                                &callsign,
-                                "ATC",
-                                "Y",
-                                &callsign,
-                            ];
+                            let msg_parts = vec![cr_msg.as_str(), &callsign, "ATC", "Y", &callsign];
                             let data = es_convert(&msg_parts);
                             if let Ok(_) = stream.lock().await.try_write(&data) {
                                 // Message sent
                             }
                         });
-                        
+
                         return Ok(MessageStatus::Handled);
                     }
                     "FP" => {

@@ -1,9 +1,9 @@
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
-use super::message_handler::{MessageHandler, MessageStatus, ClientType, parse_message};
+use super::message_handler::{parse_message, ClientType, MessageHandler, MessageStatus};
 
 /// Handler for pilot connections
 pub struct PilotHandler {
@@ -43,7 +43,7 @@ impl PilotHandler {
 impl MessageHandler for PilotHandler {
     fn handle(&mut self, message: &str) -> Result<MessageStatus> {
         let parts = parse_message(message);
-        
+
         if parts.is_empty() {
             return Ok(MessageStatus::Handled);
         }

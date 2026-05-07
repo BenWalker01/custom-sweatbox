@@ -1,13 +1,13 @@
-use anyhow::{Result, Context};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
+use anyhow::{Context, Result};
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 
 use super::controller_handler::ControllerHandler;
+use super::message_handler::{ClientType, MessageHandler, MessageStatus};
 use super::pilot_handler::PilotHandler;
-use super::message_handler::{MessageHandler, MessageStatus, ClientType};
 
 /// Main FSD server
 pub struct FsdServer {
@@ -31,7 +31,8 @@ impl FsdServer {
     /// Start the server
     pub async fn start(&self) -> Result<()> {
         let addr = format!("{}:{}", self.host, self.port);
-        let listener = TcpListener::bind(&addr).await
+        let listener = TcpListener::bind(&addr)
+            .await
             .context(format!("Failed to bind to {}", addr))?;
 
         info!("[LISTENING] Server is listening on {}", addr);
@@ -40,12 +41,14 @@ impl FsdServer {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("[NEW CONNECTION] {} connected", addr);
-                    
+
                     let controllers = self.controllers.clone();
                     let pilots = self.pilots.clone();
-                    
+
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_client(stream, addr.to_string(), controllers, pilots).await {
+                        if let Err(e) =
+                            Self::handle_client(stream, addr.to_string(), controllers, pilots).await
+                        {
                             error!("[ERROR] Client handler error: {}", e);
                         }
                     });
@@ -69,7 +72,7 @@ impl FsdServer {
         let mut handler_type: Option<ClientType> = None;
         let mut controller_handler: Option<Arc<Mutex<ControllerHandler>>> = None;
         let mut pilot_handler: Option<Arc<Mutex<PilotHandler>>> = None;
-        
+
         // We'll split the stream on first message
         let mut stream_opt = Some(stream);
         let mut read_stream: Option<tokio::net::tcp::OwnedReadHalf> = None;
@@ -82,7 +85,7 @@ impl FsdServer {
             } else {
                 break;
             };
-            
+
             match read_result {
                 Ok(0) => {
                     info!("[DISCONNECTED] {} disconnected", addr);
@@ -106,18 +109,19 @@ impl FsdServer {
                         // Determine client type on first message
                         if first_message {
                             first_message = false;
-                            
+
                             if message.contains("AA") {
                                 // Controller login
                                 if let Some(s) = stream_opt.take() {
                                     let (read_half, write_half) = s.into_split();
                                     let stream_arc = Arc::new(Mutex::new(write_half));
-                                    let handler = Arc::new(Mutex::new(ControllerHandler::new(stream_arc)));
+                                    let handler =
+                                        Arc::new(Mutex::new(ControllerHandler::new(stream_arc)));
                                     controllers.lock().await.push(handler.clone());
                                     controller_handler = Some(handler.clone());
                                     handler_type = Some(ClientType::Controller);
                                     read_stream = Some(read_half);
-                                    
+
                                     // Process the login message to get callsign
                                     let _ = handler.lock().await.handle(message);
                                     let callsign = handler.lock().await.callsign().to_string();
@@ -128,12 +132,13 @@ impl FsdServer {
                                 if let Some(s) = stream_opt.take() {
                                     let (read_half, write_half) = s.into_split();
                                     let stream_arc = Arc::new(Mutex::new(write_half));
-                                    let handler = Arc::new(Mutex::new(PilotHandler::new(stream_arc)));
+                                    let handler =
+                                        Arc::new(Mutex::new(PilotHandler::new(stream_arc)));
                                     pilots.lock().await.push(handler.clone());
                                     pilot_handler = Some(handler.clone());
                                     handler_type = Some(ClientType::Pilot);
                                     read_stream = Some(read_half);
-                                    
+
                                     // Process the login message to get callsign
                                     let _ = handler.lock().await.handle(message);
                                     let callsign = handler.lock().await.callsign().to_string();
@@ -176,7 +181,8 @@ impl FsdServer {
                                         &controllers,
                                         &pilots,
                                         controller_handler.as_ref(),
-                                    ).await?;
+                                    )
+                                    .await?;
                                 }
                             }
                             MessageStatus::ForwardToControllers => {
@@ -186,7 +192,12 @@ impl FsdServer {
                                     _ => None,
                                 };
 
-                                Self::forward_to_controllers(message, &controllers, sender_controller).await?;
+                                Self::forward_to_controllers(
+                                    message,
+                                    &controllers,
+                                    sender_controller,
+                                )
+                                .await?;
                             }
                             MessageStatus::ForwardToAllControllers => {
                                 // Forward to all controllers
@@ -231,7 +242,7 @@ impl FsdServer {
         }
 
         let plane_callsign = parts[3];
-        
+
         // Find the pilot
         let pilots_lock = pilots.lock().await;
         for pilot in pilots_lock.iter() {
@@ -240,9 +251,8 @@ impl FsdServer {
                 if let Some(controller) = requesting_controller {
                     // Send flight plan
                     if !pilot_guard.fp_message.is_empty() {
-                        let fp_parts: Vec<&str> = pilot_guard.fp_message.iter()
-                            .map(|s| s.as_str())
-                            .collect();
+                        let fp_parts: Vec<&str> =
+                            pilot_guard.fp_message.iter().map(|s| s.as_str()).collect();
                         controller.lock().await.send_message(&fp_parts).await?;
                     }
 
@@ -276,7 +286,7 @@ impl FsdServer {
         if message.contains("@94835") {
             info!("[FORWARD CTRL CMD] {}", message);
         }
-        
+
         for controller in controllers_lock.iter() {
             if let Some(sender) = exclude_controller {
                 if Arc::ptr_eq(controller, sender) {
@@ -286,7 +296,11 @@ impl FsdServer {
 
             let ctrl = controller.lock().await;
             if let Err(e) = ctrl.send_message(&[message]).await {
-                warn!("[ERROR] Failed to send to controller {}: {}", ctrl.callsign(), e);
+                warn!(
+                    "[ERROR] Failed to send to controller {}: {}",
+                    ctrl.callsign(),
+                    e
+                );
             }
         }
 

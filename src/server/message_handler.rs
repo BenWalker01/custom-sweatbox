@@ -22,10 +22,10 @@ pub enum MessageStatus {
 pub trait MessageHandler: Send + Sync {
     /// Handle an incoming message
     fn handle(&mut self, message: &str) -> Result<MessageStatus>;
-    
+
     /// Get the callsign of this client
     fn callsign(&self) -> &str;
-    
+
     /// Get the client type
     fn client_type(&self) -> ClientType;
 }

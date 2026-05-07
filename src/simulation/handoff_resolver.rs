@@ -435,7 +435,10 @@ impl OwnershipResolver {
         Ok(rules)
     }
 
-    fn resolve_rule_geometry(rule: &SectorRule, geometry: &SectorGeometryIndex) -> Option<Geometry> {
+    fn resolve_rule_geometry(
+        rule: &SectorRule,
+        geometry: &SectorGeometryIndex,
+    ) -> Option<Geometry> {
         if !rule.borders.is_empty() {
             if rule.borders.len() == 1 {
                 let border = &rule.borders[0];
@@ -559,13 +562,19 @@ impl SectorRule {
         }
 
         if !self.dep_apts.is_empty()
-            && !self.dep_apts.iter().any(|dep| dep.eq_ignore_ascii_case(departure))
+            && !self
+                .dep_apts
+                .iter()
+                .any(|dep| dep.eq_ignore_ascii_case(departure))
         {
             return false;
         }
 
         if !self.arr_apts.is_empty()
-            && !self.arr_apts.iter().any(|arr_apt| arr_apt.eq_ignore_ascii_case(arrival))
+            && !self
+                .arr_apts
+                .iter()
+                .any(|arr_apt| arr_apt.eq_ignore_ascii_case(arrival))
         {
             return false;
         }
@@ -666,7 +675,9 @@ mod tests {
         };
 
         let resolver = OwnershipResolver {
-            airport_rules: vec![AirportRuleSet { sectors: vec![rule] }],
+            airport_rules: vec![AirportRuleSet {
+                sectors: vec![rule],
+            }],
             callsigns_by_code: HashMap::from([
                 ("AAA".to_string(), vec!["FIRST_CTRL".to_string()]),
                 ("BBB".to_string(), vec!["SECOND_CTRL".to_string()]),
