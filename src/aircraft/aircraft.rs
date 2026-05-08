@@ -34,6 +34,8 @@ pub struct IlsGuidance {
     pub threshold_lon: f64,
     pub runway_heading: f64,
     pub runway_elevation_ft: i32,
+    pub cleared_heading: f64,
+    pub intercept_started: bool,
 }
 
 /// Hold guidance definition
@@ -449,7 +451,7 @@ impl Aircraft {
 
     // @ todo remove these to a utils place (I was lazy)
 
-    fn normalize_heading(&mut self, mut heading: f64) -> f64 {
+    fn normalize_heading(&self, mut heading: f64) -> f64 {
         while heading < 0.0 {
             heading += 360.0;
         }
@@ -469,7 +471,7 @@ impl Aircraft {
     // Returns shortest signed angle difference:
     // positive = turn right
     // negative = turn left
-    fn shortest_angle_difference(&mut self, from: f64, to: f64) -> f64 {
+    fn shortest_angle_difference(&self, from: f64, to: f64) -> f64 {
         let mut diff = self.normalize_heading(to) - self.normalize_heading(from);
 
         while diff > 180.0 {
@@ -483,53 +485,119 @@ impl Aircraft {
         diff
     }
 
+    fn heading_vector_xy_nm(heading: f64) -> (f64, f64) {
+        let radians = heading.to_radians();
+        (radians.sin(), radians.cos())
+    }
+
+    fn to_local_xy_nm(lat: f64, lon: f64, reference_lat: f64) -> (f64, f64) {
+        let x = lon * 60.0 * reference_lat.to_radians().cos();
+        let y = lat * 60.0;
+        (x, y)
+    }
+
+    fn from_local_xy_nm(x: f64, y: f64, reference_lat: f64) -> (f64, f64) {
+        let lat = y / 60.0;
+        let cos_lat = reference_lat.to_radians().cos().max(1e-6);
+        let lon = x / (60.0 * cos_lat);
+        (lat, lon)
+    }
+
+    fn project_to_localizer_centerline(
+        &self,
+        runway_threshold: (f64, f64),
+        runway_heading: f64,
+    ) -> (f64, f64, f64) {
+        let localizer_outbound = self.normalize_heading(runway_heading + 180.0);
+        let reference_lat = (self.latitude + runway_threshold.0) / 2.0;
+        let (ax, ay) = Self::to_local_xy_nm(self.latitude, self.longitude, reference_lat);
+        let (lx, ly) = Self::to_local_xy_nm(runway_threshold.0, runway_threshold.1, reference_lat);
+        let (dx, dy) = Self::heading_vector_xy_nm(localizer_outbound);
+
+        let rx = ax - lx;
+        let ry = ay - ly;
+        let along_track_nm = rx * dx + ry * dy;
+        let projected_x = lx + along_track_nm * dx;
+        let projected_y = ly + along_track_nm * dy;
+        let cross_track_nm = (rx * dy - ry * dx).abs();
+        let (projected_lat, projected_lon) =
+            Self::from_local_xy_nm(projected_x, projected_y, reference_lat);
+        (projected_lat, projected_lon, cross_track_nm)
+    }
+
+    fn distance_to_localizer_intersection_nm(
+        &self,
+        runway_threshold: (f64, f64),
+        runway_heading: f64,
+    ) -> Option<f64> {
+        let aircraft_lat = self.latitude;
+        let aircraft_lon = self.longitude;
+        let aircraft_heading = self.heading;
+        let localizer_outbound = self.normalize_heading(runway_heading + 180.0);
+        let reference_lat = (aircraft_lat + runway_threshold.0) / 2.0;
+
+        let (ax, ay) = Self::to_local_xy_nm(aircraft_lat, aircraft_lon, reference_lat);
+        let (lx, ly) = Self::to_local_xy_nm(runway_threshold.0, runway_threshold.1, reference_lat);
+        let (adx, ady) = Self::heading_vector_xy_nm(aircraft_heading);
+        let (ldx, ldy) = Self::heading_vector_xy_nm(localizer_outbound);
+
+        let dx = lx - ax;
+        let dy = ly - ay;
+
+        // Solve:
+        // aircraft + t * aircraft_dir = localizer_origin + u * localizer_dir
+        // t is distance along current heading in NM (dir vectors are unit length in our local plane).
+        let determinant = adx * (-ldy) - ady * (-ldx);
+        if determinant.abs() < 1e-6 {
+            return None;
+        }
+
+        let t = (dx * (-ldy) - dy * (-ldx)) / determinant;
+        let u = (adx * dy - ady * dx) / determinant;
+
+        if t >= 0.0 && u >= 0.0 {
+            Some(t)
+        } else {
+            None
+        }
+    }
+
     fn update_ils_guidance(
         &mut self,
         delta_time: f64,
         sim_config: &crate::config::SimulationConfig,
     ) {
-        tracing::info!("Updating ILS for {}", self.callsign);
+        let (
+            threshold_lat,
+            threshold_lon,
+            runway_heading_raw,
+            runway_elevation_ft,
+            cleared_heading,
+            intercept_started,
+        ) = if let Some(ils) = self.ils_guidance.as_ref() {
+            (
+                ils.threshold_lat,
+                ils.threshold_lon,
+                ils.runway_heading,
+                ils.runway_elevation_ft,
+                ils.cleared_heading,
+                ils.intercept_started,
+            )
+        } else {
+            self.lateral_mode = LateralMode::FlightPlan;
+            return;
+        };
 
-        let (threshold_lat, threshold_lon, runway_heading, runway_elevation_ft) =
-            if let Some(ils) = self.ils_guidance.as_ref() {
-                // copy needed fields while only immutably borrowing self
-                (
-                    ils.threshold_lat,
-                    ils.threshold_lon,
-                    // copy raw heading first, normalize after the borrow ends
-                    ils.runway_heading,
-                    ils.runway_elevation_ft,
-                )
-            } else {
-                self.lateral_mode = LateralMode::FlightPlan;
-                return;
-            };
-
-        // normalize_heading may need &mut self; do it after the immutable borrow above has ended
-        let runway_heading = self.normalize_heading(runway_heading);
+        let runway_heading = self.normalize_heading(runway_heading_raw);
 
         // ---------------------------------------------------------------------
         // DISTANCE / GLIDESLOPE
         // ---------------------------------------------------------------------
 
         let distance_nm = haversine_nm(self.latitude, self.longitude, threshold_lat, threshold_lon);
-
-        tracing::info!(
-            "{} : {} {}, {}nm, {}°",
-            self.callsign,
-            threshold_lat,
-            threshold_lon,
-            distance_nm,
-            runway_heading
-        );
-
         let glideslope_altitude = ((distance_nm * 6076.0 * 3.0_f64.to_radians().tan()).round()
             as i32)
             + runway_elevation_ft;
-
-        if self.altitude - glideslope_altitude > 1000 {
-            tracing::error!("{}, TOO HIGH!", self.callsign);
-        }
 
         if self.altitude > glideslope_altitude + 100 {
             self.target_altitude = glideslope_altitude.max(runway_elevation_ft);
@@ -538,75 +606,149 @@ impl Aircraft {
         if distance_nm < 8.0 && self.target_speed > 160 {
             self.target_speed = 160;
         }
-
         if distance_nm < 4.0 {
             self.phase = FlightPhase::Approach;
         }
-
         if distance_nm < 1.0 {
             self.target_altitude = runway_elevation_ft;
             self.phase = FlightPhase::Landing;
         }
 
         // ---------------------------------------------------------------------
-        // LOCALIZER CAPTURE / TRACKING
+        // LOCALIZER INTERCEPT / TRACK
         // ---------------------------------------------------------------------
 
-        // Bearing FROM runway threshold TO aircraft
+        // Signed localizer error where (for this bearing convention):
+        // negative => aircraft is right of centerline
+        // positive => aircraft is left of centerline
+        let localizer_outbound = self.normalize_heading(runway_heading + 180.0);
         let bearing_from_threshold =
             self.initial_bearing(threshold_lat, threshold_lon, self.latitude, self.longitude);
+        let localizer_error =
+            self.shortest_angle_difference(localizer_outbound, bearing_from_threshold);
+        let (snap_lat, snap_lon, cross_track_nm) =
+            self.project_to_localizer_centerline((threshold_lat, threshold_lon), runway_heading);
 
-        // Reciprocal of runway heading = localizer outbound course
-        let localizer_outbound = self.normalize_heading(runway_heading + 180.0);
+        const CENTERLINE_SNAP_TOLERANCE_NM: f64 = 0.03;
+        if cross_track_nm <= CENTERLINE_SNAP_TOLERANCE_NM {
+            self.latitude = snap_lat;
+            self.longitude = snap_lon;
+            self.heading = runway_heading;
+            self.target_heading = runway_heading;
+            if let Some(ils) = self.ils_guidance.as_mut() {
+                ils.intercept_started = true;
+            }
 
-        // Angular error from centerline
-        // negative = aircraft left of localizer
-        // positive = aircraft right of localizer
-        let localizer_error = self.shortest_angle_difference(localizer_outbound, bearing_from_threshold);
+            tracing::info!(
+                "[ILS DEBUG {}] centerline-snap rwy {:.1} cross_track {:.3}nm tol {:.3} heading {:.1}",
+                self.callsign,
+                runway_heading,
+                cross_track_nm,
+                CENTERLINE_SNAP_TOLERANCE_NM,
+                runway_heading
+            );
+            return;
+        }
 
-        tracing::info!("{} localizer error: {:.2}", self.callsign, localizer_error);
+        let angle_to_runway_course = self
+            .shortest_angle_difference(self.heading, runway_heading)
+            .abs();
+        let turn_rate = sim_config.turn_rate.max(1.0);
+        let turn_time_seconds = angle_to_runway_course / turn_rate;
+        let effective_speed = self.ground_speed.max(self.target_speed).max(120) as f64;
+        let turn_distance_nm = effective_speed * turn_time_seconds / 3600.0;
+        let step_distance_nm = effective_speed * delta_time / 3600.0;
+        let distance_to_intersection_nm = self
+            .distance_to_localizer_intersection_nm((threshold_lat, threshold_lon), runway_heading);
 
-        // Desired intercept angle
-        // Bigger when far away, smaller when close
-        let intercept_angle = if distance_nm > 10.0 {
-            30.0
-        } else if distance_nm > 5.0 {
-            20.0
+        // Hold the assigned heading until the geometric "last-second" turn point.
+        let should_start_intercept =
+            distance_to_intersection_nm.is_some_and(|distance| distance <= turn_distance_nm);
+
+        if should_start_intercept && !intercept_started {
+            if let Some(ils) = self.ils_guidance.as_mut() {
+                ils.intercept_started = true;
+            }
+        }
+
+        let intercept_active = intercept_started || should_start_intercept;
+
+        if !intercept_active {
+            self.target_heading = cleared_heading;
+            tracing::info!(
+                "[ILS DEBUG {}] hold-vector rwy {:.1} cur {:.1} tgt {:.1} clr {:.1} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} turn_dist {:.2} step {:.3}",
+                self.callsign,
+                runway_heading,
+                self.heading,
+                self.target_heading,
+                cleared_heading,
+                distance_nm,
+                localizer_error,
+                angle_to_runway_course,
+                distance_to_intersection_nm,
+                turn_distance_nm,
+                step_distance_nm
+            );
+            self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate);
+            return;
+        }
+
+        const FINAL_TURN_SNAP_TOLERANCE_NM: f64 = 0.08;
+        if angle_to_runway_course <= 1.0 && cross_track_nm <= FINAL_TURN_SNAP_TOLERANCE_NM {
+            self.latitude = snap_lat;
+            self.longitude = snap_lon;
+            self.heading = runway_heading;
+            self.target_heading = runway_heading;
+            tracing::info!(
+                "[ILS DEBUG {}] post-turn-snap rwy {:.1} cross_track {:.3}nm tol {:.3} angle_to_course {:.2}",
+                self.callsign,
+                runway_heading,
+                cross_track_nm,
+                FINAL_TURN_SNAP_TOLERANCE_NM,
+                angle_to_runway_course
+            );
+            return;
+        }
+
+        let previous_target_heading = self.target_heading;
+        let (desired_heading, guidance_mode, guidance_value) = if localizer_error.abs() <= 1.0 {
+            // Once captured, apply small proportional corrections to stay on localizer.
+            let correction = (localizer_error * 1.5).clamp(-8.0, 8.0);
+            (
+                self.normalize_heading(runway_heading + correction),
+                "track",
+                correction,
+            )
         } else {
-            10.0
+            // Continuous turn: once triggered, go straight to final course.
+            (
+                runway_heading,
+                "continuous-turn-final",
+                self.shortest_angle_difference(self.heading, runway_heading),
+            )
         };
-
-        // If left of localizer -> turn right toward course
-        // If right of localizer -> turn left toward course
-        let desired_heading = if localizer_error < -1.0 {
-            self.normalize_heading(runway_heading + intercept_angle)
-        } else if localizer_error > 1.0 {
-            self.normalize_heading(runway_heading - intercept_angle)
-        } else {
-            // On localizer -> fly runway heading
-            runway_heading
-        };
-
-        // ---------------------------------------------------------------------
-        // TURN RATE LIMITED HEADING CHANGE
-        // 3 degrees / second
-        // ---------------------------------------------------------------------
-
-        let max_turn = 3.0 * delta_time;
-
-        let heading_error = self.shortest_angle_difference(self.heading, desired_heading);
-
-        let heading_change = heading_error.clamp(-max_turn, max_turn);
-
-        self.heading = self.normalize_heading(self.heading + heading_change);
 
         tracing::info!(
-            "{} hdg {:.1} -> {:.1} desired {:.1}",
+            "[ILS DEBUG {}] {} rwy {:.1} cur {:.1} prev_tgt {:.1} desired {:.1} clr {:.1} active {} trigger_now {} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} turn_dist {:.2} step {:.3} guidance {:.2}",
             self.callsign,
+            guidance_mode,
+            runway_heading,
             self.heading,
-            self.heading + heading_change,
-            desired_heading
+            previous_target_heading,
+            desired_heading,
+            cleared_heading,
+            intercept_active,
+            should_start_intercept,
+            distance_nm,
+            localizer_error,
+            angle_to_runway_course,
+            distance_to_intersection_nm,
+            turn_distance_nm,
+            step_distance_nm,
+            guidance_value
         );
+        self.target_heading = desired_heading;
+        self.turn_towards(desired_heading, delta_time, sim_config.turn_rate);
     }
 
     fn update_hold_guidance(
@@ -834,6 +976,8 @@ impl Aircraft {
             threshold_lon: threshold.1,
             runway_heading,
             runway_elevation_ft,
+            cleared_heading: self.target_heading,
+            intercept_started: false,
         });
 
         self.auto_climb_to_cruise = false;
