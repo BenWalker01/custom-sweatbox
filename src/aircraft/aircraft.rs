@@ -654,16 +654,21 @@ impl Aircraft {
             .shortest_angle_difference(self.heading, runway_heading)
             .abs();
         let turn_rate = sim_config.turn_rate.max(1.0);
-        let turn_time_seconds = angle_to_runway_course / turn_rate;
         let effective_speed = self.ground_speed.max(self.target_speed).max(120) as f64;
-        let turn_distance_nm = effective_speed * turn_time_seconds / 3600.0;
+        let omega_rad_per_sec = turn_rate.to_radians().max(1e-6);
+        let turn_radius_nm = (effective_speed / 3600.0) / omega_rad_per_sec;
+        let course_change_rad = angle_to_runway_course
+            .to_radians()
+            .min(std::f64::consts::PI - 0.01);
+        // Fly-by turn anticipation distance so the aircraft rolls out on the new course.
+        let lead_turn_distance_nm = turn_radius_nm * (course_change_rad / 2.0).tan().abs();
         let step_distance_nm = effective_speed * delta_time / 3600.0;
         let distance_to_intersection_nm = self
             .distance_to_localizer_intersection_nm((threshold_lat, threshold_lon), runway_heading);
 
-        // Hold the assigned heading until the geometric "last-second" turn point.
-        let should_start_intercept =
-            distance_to_intersection_nm.is_some_and(|distance| distance <= turn_distance_nm);
+        // Hold heading until the turn-anticipation point, then make one continuous turn.
+        let should_start_intercept = distance_to_intersection_nm
+            .is_some_and(|distance| distance <= lead_turn_distance_nm + step_distance_nm);
 
         if should_start_intercept && !intercept_started {
             if let Some(ils) = self.ils_guidance.as_mut() {
@@ -676,7 +681,7 @@ impl Aircraft {
         if !intercept_active {
             self.target_heading = cleared_heading;
             tracing::info!(
-                "[ILS DEBUG {}] hold-vector rwy {:.1} cur {:.1} tgt {:.1} clr {:.1} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} turn_dist {:.2} step {:.3}",
+                "[ILS DEBUG {}] hold-vector rwy {:.1} cur {:.1} tgt {:.1} clr {:.1} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3}",
                 self.callsign,
                 runway_heading,
                 self.heading,
@@ -686,15 +691,15 @@ impl Aircraft {
                 localizer_error,
                 angle_to_runway_course,
                 distance_to_intersection_nm,
-                turn_distance_nm,
+                lead_turn_distance_nm,
                 step_distance_nm
             );
             self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate);
             return;
         }
 
-        const FINAL_TURN_SNAP_TOLERANCE_NM: f64 = 0.08;
-        if angle_to_runway_course <= 1.0 && cross_track_nm <= FINAL_TURN_SNAP_TOLERANCE_NM {
+        const FINAL_TURN_SNAP_TOLERANCE_NM: f64 = 0.05;
+        if cross_track_nm <= FINAL_TURN_SNAP_TOLERANCE_NM {
             self.latitude = snap_lat;
             self.longitude = snap_lon;
             self.heading = runway_heading;
@@ -720,7 +725,7 @@ impl Aircraft {
                 correction,
             )
         } else {
-            // Continuous turn: once triggered, go straight to final course.
+            // Continuous late turn: once triggered, roll directly to final course.
             (
                 runway_heading,
                 "continuous-turn-final",
@@ -729,7 +734,7 @@ impl Aircraft {
         };
 
         tracing::info!(
-            "[ILS DEBUG {}] {} rwy {:.1} cur {:.1} prev_tgt {:.1} desired {:.1} clr {:.1} active {} trigger_now {} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} turn_dist {:.2} step {:.3} guidance {:.2}",
+            "[ILS DEBUG {}] {} rwy {:.1} cur {:.1} prev_tgt {:.1} desired {:.1} clr {:.1} active {} trigger_now {} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3} guidance {:.2}",
             self.callsign,
             guidance_mode,
             runway_heading,
@@ -743,7 +748,7 @@ impl Aircraft {
             localizer_error,
             angle_to_runway_course,
             distance_to_intersection_nm,
-            turn_distance_nm,
+            lead_turn_distance_nm,
             step_distance_nm,
             guidance_value
         );
