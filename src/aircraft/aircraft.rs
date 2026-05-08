@@ -639,14 +639,14 @@ impl Aircraft {
                 ils.intercept_started = true;
             }
 
-            tracing::info!(
-                "[ILS DEBUG {}] centerline-snap rwy {:.1} cross_track {:.3}nm tol {:.3} heading {:.1}",
-                self.callsign,
-                runway_heading,
-                cross_track_nm,
-                CENTERLINE_SNAP_TOLERANCE_NM,
-                runway_heading
-            );
+            // tracing::info!(
+            //     "[ILS DEBUG {}] centerline-snap rwy {:.1} cross_track {:.3}nm tol {:.3} heading {:.1}",
+            //     self.callsign,
+            //     runway_heading,
+            //     cross_track_nm,
+            //     CENTERLINE_SNAP_TOLERANCE_NM,
+            //     runway_heading
+            // );
             return;
         }
 
@@ -680,20 +680,20 @@ impl Aircraft {
 
         if !intercept_active {
             self.target_heading = cleared_heading;
-            tracing::info!(
-                "[ILS DEBUG {}] hold-vector rwy {:.1} cur {:.1} tgt {:.1} clr {:.1} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3}",
-                self.callsign,
-                runway_heading,
-                self.heading,
-                self.target_heading,
-                cleared_heading,
-                distance_nm,
-                localizer_error,
-                angle_to_runway_course,
-                distance_to_intersection_nm,
-                lead_turn_distance_nm,
-                step_distance_nm
-            );
+            // tracing::info!(
+            //     "[ILS DEBUG {}] hold-vector rwy {:.1} cur {:.1} tgt {:.1} clr {:.1} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3}",
+            //     self.callsign,
+            //     runway_heading,
+            //     self.heading,
+            //     self.target_heading,
+            //     cleared_heading,
+            //     distance_nm,
+            //     localizer_error,
+            //     angle_to_runway_course,
+            //     distance_to_intersection_nm,
+            //     lead_turn_distance_nm,
+            //     step_distance_nm
+            // );
             self.turn_towards(self.target_heading, delta_time, sim_config.turn_rate);
             return;
         }
@@ -704,14 +704,14 @@ impl Aircraft {
             self.longitude = snap_lon;
             self.heading = runway_heading;
             self.target_heading = runway_heading;
-            tracing::info!(
-                "[ILS DEBUG {}] post-turn-snap rwy {:.1} cross_track {:.3}nm tol {:.3} angle_to_course {:.2}",
-                self.callsign,
-                runway_heading,
-                cross_track_nm,
-                FINAL_TURN_SNAP_TOLERANCE_NM,
-                angle_to_runway_course
-            );
+            // tracing::info!(
+            //     "[ILS DEBUG {}] post-turn-snap rwy {:.1} cross_track {:.3}nm tol {:.3} angle_to_course {:.2}",
+            //     self.callsign,
+            //     runway_heading,
+            //     cross_track_nm,
+            //     FINAL_TURN_SNAP_TOLERANCE_NM,
+            //     angle_to_runway_course
+            // );
             return;
         }
 
@@ -733,25 +733,25 @@ impl Aircraft {
             )
         };
 
-        tracing::info!(
-            "[ILS DEBUG {}] {} rwy {:.1} cur {:.1} prev_tgt {:.1} desired {:.1} clr {:.1} active {} trigger_now {} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3} guidance {:.2}",
-            self.callsign,
-            guidance_mode,
-            runway_heading,
-            self.heading,
-            previous_target_heading,
-            desired_heading,
-            cleared_heading,
-            intercept_active,
-            should_start_intercept,
-            distance_nm,
-            localizer_error,
-            angle_to_runway_course,
-            distance_to_intersection_nm,
-            lead_turn_distance_nm,
-            step_distance_nm,
-            guidance_value
-        );
+        // tracing::info!(
+        //     "[ILS DEBUG {}] {} rwy {:.1} cur {:.1} prev_tgt {:.1} desired {:.1} clr {:.1} active {} trigger_now {} dist {:.2}nm loc_err {:.2} angle_to_course {:.2} intx_dist {:?} lead_turn {:.2} step {:.3} guidance {:.2}",
+        //     self.callsign,
+        //     guidance_mode,
+        //     runway_heading,
+        //     self.heading,
+        //     previous_target_heading,
+        //     desired_heading,
+        //     cleared_heading,
+        //     intercept_active,
+        //     should_start_intercept,
+        //     distance_nm,
+        //     localizer_error,
+        //     angle_to_runway_course,
+        //     distance_to_intersection_nm,
+        //     lead_turn_distance_nm,
+        //     step_distance_nm,
+        //     guidance_value
+        // );
         self.target_heading = desired_heading;
         self.turn_towards(desired_heading, delta_time, sim_config.turn_rate);
     }

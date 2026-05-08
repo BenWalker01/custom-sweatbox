@@ -32,6 +32,34 @@ struct PendingTransitProfileHandoff {
     agreed_altitude_ft: i32,
 }
 
+#[derive(Debug, Clone)]
+pub enum SimulatorControlCommand {
+    Pause,
+    Resume,
+    SetSpeedMultiplier(f64),
+    SetSpawnGroupInterval {
+        group_id: String,
+        interval_seconds: f64,
+    },
+    Stop,
+}
+
+#[derive(Debug, Clone)]
+struct DepartureSpawnTimer {
+    group_id: String,
+    aerodrome: String,
+    interval_ticks: f64,
+    last_spawn_tick: f64,
+}
+
+#[derive(Debug, Clone)]
+struct TransitSpawnTimer {
+    group_id: String,
+    transit_index: usize,
+    interval_ticks: f64,
+    last_spawn_tick: f64,
+}
+
 /// Main simulation controller
 pub struct Simulator {
     scenario: Arc<Scenario>,
@@ -179,12 +207,23 @@ impl Simulator {
 
     /// Start the main simulation loop
     pub async fn run(&mut self, shutdown: tokio::sync::broadcast::Receiver<()>) -> Result<()> {
+        self.run_with_controls(shutdown, None).await
+    }
+
+    pub async fn run_with_controls(
+        &mut self,
+        shutdown: tokio::sync::broadcast::Receiver<()>,
+        mut control_rx: Option<UnboundedReceiver<SimulatorControlCommand>>,
+    ) -> Result<()> {
         info!("[SIMULATOR] Starting main simulation loop...");
         self.running = true;
 
         // Create timers for different spawn intervals
         let mut departure_timers = self.create_departure_timers();
         let mut transit_timers = self.create_transit_timers();
+        let mut simulation_ticks = 0.0f64;
+        let mut paused = false;
+        let mut speed_multiplier = 1.0f64;
 
         // Main update loop (runs at radar update rate)
         let radar_update_ms = (1000.0 / self.sim_config.radar_update_rate) as u64;
@@ -201,14 +240,101 @@ impl Simulator {
                 }
                 _ = update_interval.tick() => {
                     loop_count += 1;
+                    let mut stop_requested = false;
 
-                    let delta_time = (radar_update_ms as f64) / 1000.0;
+                    if let Some(rx) = control_rx.as_mut() {
+                        loop {
+                            match rx.try_recv() {
+                                Ok(command) => {
+                                    match command {
+                                        SimulatorControlCommand::Pause => {
+                                            paused = true;
+                                            info!("[SIMULATOR] Paused");
+                                        }
+                                        SimulatorControlCommand::Resume => {
+                                            paused = false;
+                                            info!("[SIMULATOR] Resumed");
+                                        }
+                                        SimulatorControlCommand::SetSpeedMultiplier(multiplier) => {
+                                            if multiplier <= 0.0 {
+                                                warn!(
+                                                    "[SIMULATOR] Ignoring invalid speed multiplier {}",
+                                                    multiplier
+                                                );
+                                            } else {
+                                                speed_multiplier = multiplier;
+                                                info!(
+                                                    "[SIMULATOR] Speed multiplier set to {:.2}x",
+                                                    speed_multiplier
+                                                );
+                                            }
+                                        }
+                                        SimulatorControlCommand::SetSpawnGroupInterval {
+                                            group_id,
+                                            interval_seconds,
+                                        } => {
+                                            if interval_seconds <= 0.0 {
+                                                warn!(
+                                                    "[SIMULATOR] Ignoring invalid spawn interval {}s for {}",
+                                                    interval_seconds,
+                                                    group_id
+                                                );
+                                                continue;
+                                            }
+
+                                            let updated = self.update_spawn_group_interval(
+                                                &group_id,
+                                                interval_seconds,
+                                                simulation_ticks,
+                                                &mut departure_timers,
+                                                &mut transit_timers,
+                                            );
+
+                                            if updated {
+                                                info!(
+                                                    "[SIMULATOR] Updated spawn interval for {} to {:.1}s",
+                                                    group_id,
+                                                    interval_seconds
+                                                );
+                                            } else {
+                                                warn!(
+                                                    "[SIMULATOR] Spawn group {} not found for interval update",
+                                                    group_id
+                                                );
+                                            }
+                                        }
+                                        SimulatorControlCommand::Stop => {
+                                            info!("[SIMULATOR] Stop requested via instructor controls");
+                                            stop_requested = true;
+                                        }
+                                    }
+                                }
+                                Err(TryRecvError::Empty) => break,
+                                Err(TryRecvError::Disconnected) => {
+                                    control_rx = None;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if stop_requested {
+                        break;
+                    }
+
+                    if paused {
+                        continue;
+                    }
+
+                    simulation_ticks += speed_multiplier;
+
+                    let delta_time = ((radar_update_ms as f64) / 1000.0) * speed_multiplier;
 
                     // Check departure timers
-                    self.check_departure_spawns(&mut departure_timers, loop_count).await?;
+                    self.check_departure_spawns(&mut departure_timers, simulation_ticks).await?;
 
                     // Check transit timers
-                    self.check_transit_spawns(&mut transit_timers, loop_count).await?;
+                    self.check_transit_spawns(&mut transit_timers, simulation_ticks).await?;
 
                     // Apply controller-issued commands to simulated aircraft
                     self.process_controller_messages().await?;
@@ -1356,29 +1482,79 @@ impl Simulator {
         }
     }
 
+    fn departure_group_id(aerodrome: &str) -> String {
+        format!("DEP:{}", aerodrome.to_uppercase())
+    }
+
+    fn transit_group_id(index: usize) -> String {
+        format!("TRN:{}", index)
+    }
+
+    fn seconds_to_spawn_ticks(&self, interval_seconds: f64) -> f64 {
+        (interval_seconds * self.sim_config.radar_update_rate).max(1.0)
+    }
+
+    fn update_spawn_group_interval(
+        &self,
+        group_id: &str,
+        interval_seconds: f64,
+        simulation_ticks: f64,
+        departure_timers: &mut [DepartureSpawnTimer],
+        transit_timers: &mut [TransitSpawnTimer],
+    ) -> bool {
+        let normalized = group_id.trim().to_uppercase();
+        let interval_ticks = self.seconds_to_spawn_ticks(interval_seconds);
+
+        for timer in departure_timers.iter_mut() {
+            if timer.group_id == normalized {
+                timer.interval_ticks = interval_ticks;
+                timer.last_spawn_tick = simulation_ticks;
+                return true;
+            }
+        }
+
+        for timer in transit_timers.iter_mut() {
+            if timer.group_id == normalized {
+                timer.interval_ticks = interval_ticks;
+                timer.last_spawn_tick = simulation_ticks;
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Create departure spawn timers
-    fn create_departure_timers(&self) -> Vec<(String, u64, u64)> {
+    fn create_departure_timers(&self) -> Vec<DepartureSpawnTimer> {
         self.scenario
             .departure_configs()
             .iter()
             .map(|dep| {
-                let interval_ticks =
-                    (dep.interval as f64 / (1.0 / self.sim_config.radar_update_rate)) as u64;
-                (dep.departing.clone(), interval_ticks, 0u64)
+                let interval_ticks = self.seconds_to_spawn_ticks(dep.interval as f64);
+                DepartureSpawnTimer {
+                    group_id: Self::departure_group_id(&dep.departing),
+                    aerodrome: dep.departing.clone(),
+                    interval_ticks,
+                    last_spawn_tick: 0.0,
+                }
             })
             .collect()
     }
 
     /// Create transit spawn timers
-    fn create_transit_timers(&self) -> Vec<(usize, u64, u64)> {
+    fn create_transit_timers(&self) -> Vec<TransitSpawnTimer> {
         self.scenario
             .transit_configs()
             .iter()
             .enumerate()
             .map(|(idx, transit)| {
-                let interval_ticks =
-                    (transit.interval as f64 / (1.0 / self.sim_config.radar_update_rate)) as u64;
-                (idx, interval_ticks, 0u64)
+                let interval_ticks = self.seconds_to_spawn_ticks(transit.interval as f64);
+                TransitSpawnTimer {
+                    group_id: Self::transit_group_id(idx),
+                    transit_index: idx,
+                    interval_ticks,
+                    last_spawn_tick: 0.0,
+                }
             })
             .collect()
     }
@@ -1386,15 +1562,15 @@ impl Simulator {
     /// Check and spawn departures
     async fn check_departure_spawns(
         &mut self,
-        timers: &mut [(String, u64, u64)],
-        loop_count: u64,
+        timers: &mut [DepartureSpawnTimer],
+        simulation_ticks: f64,
     ) -> Result<()> {
-        for (aerodrome, interval, last_spawn) in timers.iter_mut() {
-            if loop_count - *last_spawn >= *interval {
-                *last_spawn = loop_count;
+        for timer in timers.iter_mut() {
+            if simulation_ticks - timer.last_spawn_tick >= timer.interval_ticks {
+                timer.last_spawn_tick = simulation_ticks;
 
-                if let Some(route) = self.scenario.random_departure_route(aerodrome) {
-                    let departure = aerodrome.clone();
+                if let Some(route) = self.scenario.random_departure_route(&timer.aerodrome) {
+                    let departure = timer.aerodrome.clone();
                     let arrival = route.arriving.clone();
                     let route_str = route.route.clone();
                     self.spawn_departure(&departure, &arrival, &route_str)
@@ -1902,14 +2078,14 @@ impl Simulator {
     /// Check and spawn transits
     async fn check_transit_spawns(
         &mut self,
-        timers: &mut [(usize, u64, u64)],
-        loop_count: u64,
+        timers: &mut [TransitSpawnTimer],
+        simulation_ticks: f64,
     ) -> Result<()> {
-        for (idx, interval, last_spawn) in timers.iter_mut() {
-            if loop_count - *last_spawn >= *interval {
-                *last_spawn = loop_count;
+        for timer in timers.iter_mut() {
+            if simulation_ticks - timer.last_spawn_tick >= timer.interval_ticks {
+                timer.last_spawn_tick = simulation_ticks;
 
-                if let Some(route) = self.scenario.random_transit_route(*idx) {
+                if let Some(route) = self.scenario.random_transit_route(timer.transit_index) {
                     let departure = route.departing.clone();
                     let arrival = route.arriving.clone();
                     let route_str = route.route.clone();

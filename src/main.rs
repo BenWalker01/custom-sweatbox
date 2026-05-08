@@ -5,6 +5,7 @@ use tracing::{info, Level};
 
 mod aircraft;
 mod config;
+mod instructor;
 mod scenario;
 mod server;
 mod simulation;
@@ -40,6 +41,13 @@ enum Commands {
 
         #[arg(short, long)]
         profile: Option<String>,
+    },
+    Instructor {
+        #[arg(short, long, default_value = "127.0.0.1:6809")]
+        server: String,
+
+        #[arg(long, default_value = "profiles")]
+        profiles_dir: String,
     },
 }
 
@@ -130,6 +138,16 @@ async fn main() -> Result<()> {
             simulator.stop().await?;
 
             info!("Simulation stopped cleanly");
+        }
+        Commands::Instructor {
+            server,
+            profiles_dir,
+        } => {
+            info!(
+                "Starting instructor panel (profiles: {}, server: {})",
+                profiles_dir, server
+            );
+            instructor::run_instructor_panel(&server, &profiles_dir).await?;
         }
     }
 
