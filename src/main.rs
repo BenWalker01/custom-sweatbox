@@ -89,8 +89,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Load profile
-            let profile_path = profile.unwrap_or_else(|| "profiles/TCE + TCNE.json".to_string());
+            // Load profile - EDIT @HERE
+            let profile_path = profile.unwrap_or_else(|| "profiles/EGKK.json".to_string());
             info!("Loading simulation profile: {}", profile_path);
 
             // Load scenario using the new parser

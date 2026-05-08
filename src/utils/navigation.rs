@@ -26,14 +26,14 @@ pub fn haversine_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     haversine(lat1, lon1, lat2, lon2) / 1.852
 }
 
-pub fn heading_from_to(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> i32 {
+pub fn heading_from_to(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
     let dlon = to_lon - from_lon;
     let y = dlon.to_radians().sin() * to_lat.to_radians().cos();
     let x = from_lat.to_radians().cos() * to_lat.to_radians().sin()
         - from_lat.to_radians().sin() * to_lat.to_radians().cos() * dlon.to_radians().cos();
 
     let bearing = y.atan2(x).to_degrees();
-    ((bearing + 360.0) % 360.0) as i32
+    (bearing + 360.0) % 360.0
 }
 
 pub fn position_bearing_distance(lat: f64, lon: f64, bearing: f64, distance_nm: f64) -> (f64, f64) {
@@ -334,10 +334,10 @@ mod tests {
     #[test]
     fn test_heading() {
         let hdg = heading_from_to(50.0, 0.0, 51.0, 0.0);
-        assert!((hdg - 0).abs() < 5);
+        assert!((hdg - 0.0).abs() < 5.0);
 
         let hdg = heading_from_to(50.0, 0.0, 50.0, 1.0);
-        assert!((hdg - 90).abs() < 5);
+        assert!((hdg - 90.0).abs() < 5.0);
     }
 
     #[test]

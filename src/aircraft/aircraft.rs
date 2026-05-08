@@ -32,7 +32,7 @@ pub struct IlsGuidance {
     pub runway: String,
     pub threshold_lat: f64,
     pub threshold_lon: f64,
-    pub runway_heading: i32,
+    pub runway_heading: f64,
     pub runway_elevation_ft: i32,
 }
 
@@ -60,7 +60,7 @@ pub struct Aircraft {
     pub latitude: f64,
     pub longitude: f64,
     pub altitude: i32,     // feet
-    pub heading: i32,      // degrees
+    pub heading: f64,      // degrees
     pub ground_speed: u32, // knots
 
     // Flight plan
@@ -78,11 +78,11 @@ pub struct Aircraft {
 
     // Departure info
     pub departure_runway: String,
-    pub departure_heading: i32,
+    pub departure_heading: f64,
 
     // Target values
     pub target_altitude: i32,
-    pub target_heading: i32,
+    pub target_heading: f64,
     pub target_speed: u32,
 
     // Time tracking
@@ -101,7 +101,7 @@ impl Aircraft {
         cruise_altitude: u32,
         runway: String,
         airport_coords: (f64, f64),
-        runway_heading: i32,
+        runway_heading: f64,
     ) -> Self {
         let flight_plan = FlightPlan::new(
             aircraft_type.clone(),
@@ -295,7 +295,7 @@ impl Aircraft {
                 if self.spawn_time.elapsed().as_secs() >= 5 {
                     self.phase = FlightPhase::Departing;
                     self.ground_speed = 10;
-                    tracing::info!("[{}] Starting takeoff roll", self.callsign);
+                    // tracing::info!("[{}] Starting takeoff roll", self.callsign);
                 }
             }
 
@@ -304,11 +304,11 @@ impl Aircraft {
                 if self.ground_speed < 150 {
                     self.ground_speed += (50.0 * delta_time) as u32;
                 } else {
-                    tracing::info!(
-                        "[{}] Rotation speed reached, route_fixes.len()={}",
-                        self.callsign,
-                        self.route_fixes.len()
-                    );
+                    // tracing::info!(
+                    //     "[{}] Rotation speed reached, route_fixes.len()={}",
+                    //     self.callsign,
+                    //     self.route_fixes.len()
+                    // );
                     // Rotate and start climbing
                     self.phase = FlightPhase::Climbing;
                     self.altitude = 50;
@@ -320,12 +320,12 @@ impl Aircraft {
                             self.target_heading =
                                 heading_from_to(self.latitude, self.longitude, *fix_lat, *fix_lon);
                             self.heading = self.target_heading;
-                            tracing::info!(
-                                "[{}] Airborne, climbing to {} via {}",
-                                self.callsign,
-                                self.route_fixes[0],
-                                self.route_fixes.join(" ")
-                            );
+                            // tracing::info!(
+                            //     "[{}] Airborne, climbing to {} via {}",
+                            //     self.callsign,
+                            //     self.route_fixes[0],
+                            //     self.route_fixes.join(" ")
+                            // );
                         } else {
                             tracing::warn!(
                                 "[{}] First waypoint {} not found in nav database",
@@ -447,48 +447,99 @@ impl Aircraft {
         }
     }
 
+    // @ todo remove these to a utils place (I was lazy)
+
+    fn normalize_heading(&mut self, mut heading: f64) -> f64 {
+        while heading < 0.0 {
+            heading += 360.0;
+        }
+
+        while heading >= 360.0 {
+            heading -= 360.0;
+        }
+
+        heading
+    }
+
+    /// Initial bearing from point A to point B (degrees)
+    fn initial_bearing(&self, lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+        heading_from_to(lat1, lon1, lat2, lon2)
+    }
+
+    // Returns shortest signed angle difference:
+    // positive = turn right
+    // negative = turn left
+    fn shortest_angle_difference(&mut self, from: f64, to: f64) -> f64 {
+        let mut diff = self.normalize_heading(to) - self.normalize_heading(from);
+
+        while diff > 180.0 {
+            diff -= 360.0;
+        }
+
+        while diff < -180.0 {
+            diff += 360.0;
+        }
+
+        diff
+    }
+
     fn update_ils_guidance(
         &mut self,
         delta_time: f64,
         sim_config: &crate::config::SimulationConfig,
     ) {
-        let Some(ils) = self.ils_guidance.as_ref() else {
-            self.lateral_mode = LateralMode::FlightPlan;
-            return;
-        };
+        tracing::info!("Updating ILS for {}", self.callsign);
 
-        let threshold_lat = ils.threshold_lat;
-        let threshold_lon = ils.threshold_lon;
-        let runway_heading = ils.runway_heading;
-        let runway_elevation_ft = ils.runway_elevation_ft;
+        let (threshold_lat, threshold_lon, runway_heading, runway_elevation_ft) =
+            if let Some(ils) = self.ils_guidance.as_ref() {
+                // copy needed fields while only immutably borrowing self
+                (
+                    ils.threshold_lat,
+                    ils.threshold_lon,
+                    // copy raw heading first, normalize after the borrow ends
+                    ils.runway_heading,
+                    ils.runway_elevation_ft,
+                )
+            } else {
+                self.lateral_mode = LateralMode::FlightPlan;
+                return;
+            };
+
+        // normalize_heading may need &mut self; do it after the immutable borrow above has ended
+        let runway_heading = self.normalize_heading(runway_heading);
+
+        // ---------------------------------------------------------------------
+        // DISTANCE / GLIDESLOPE
+        // ---------------------------------------------------------------------
 
         let distance_nm = haversine_nm(self.latitude, self.longitude, threshold_lat, threshold_lon);
 
-        if distance_nm > 8.0 {
-            let intercept_heading =
-                heading_from_to(self.latitude, self.longitude, threshold_lat, threshold_lon);
-            self.turn_towards(intercept_heading, delta_time, sim_config.turn_rate);
-        } else {
-            self.turn_towards(runway_heading, delta_time, sim_config.turn_rate);
-        }
+        tracing::info!(
+            "{} : {} {}, {}nm, {}°",
+            self.callsign,
+            threshold_lat,
+            threshold_lon,
+            distance_nm,
+            runway_heading
+        );
 
         let glideslope_altitude = ((distance_nm * 6076.0 * 3.0_f64.to_radians().tan()).round()
             as i32)
             + runway_elevation_ft;
 
+        if self.altitude - glideslope_altitude > 1000 {
+            tracing::error!("{}, TOO HIGH!", self.callsign);
+        }
+
         if self.altitude > glideslope_altitude + 100 {
             self.target_altitude = glideslope_altitude.max(runway_elevation_ft);
         }
 
-        if distance_nm < 10.0 && self.target_speed > 180 {
-            self.target_speed = 180;
+        if distance_nm < 8.0 && self.target_speed > 160 {
+            self.target_speed = 160;
         }
 
-        if distance_nm < 4.0 && self.target_speed > 150 {
-            self.target_speed = 150;
-        }
-
-        if distance_nm < 6.0 {
+        if distance_nm < 4.0 {
             self.phase = FlightPhase::Approach;
         }
 
@@ -496,6 +547,66 @@ impl Aircraft {
             self.target_altitude = runway_elevation_ft;
             self.phase = FlightPhase::Landing;
         }
+
+        // ---------------------------------------------------------------------
+        // LOCALIZER CAPTURE / TRACKING
+        // ---------------------------------------------------------------------
+
+        // Bearing FROM runway threshold TO aircraft
+        let bearing_from_threshold =
+            self.initial_bearing(threshold_lat, threshold_lon, self.latitude, self.longitude);
+
+        // Reciprocal of runway heading = localizer outbound course
+        let localizer_outbound = self.normalize_heading(runway_heading + 180.0);
+
+        // Angular error from centerline
+        // negative = aircraft left of localizer
+        // positive = aircraft right of localizer
+        let localizer_error = self.shortest_angle_difference(localizer_outbound, bearing_from_threshold);
+
+        tracing::info!("{} localizer error: {:.2}", self.callsign, localizer_error);
+
+        // Desired intercept angle
+        // Bigger when far away, smaller when close
+        let intercept_angle = if distance_nm > 10.0 {
+            30.0
+        } else if distance_nm > 5.0 {
+            20.0
+        } else {
+            10.0
+        };
+
+        // If left of localizer -> turn right toward course
+        // If right of localizer -> turn left toward course
+        let desired_heading = if localizer_error < -1.0 {
+            self.normalize_heading(runway_heading + intercept_angle)
+        } else if localizer_error > 1.0 {
+            self.normalize_heading(runway_heading - intercept_angle)
+        } else {
+            // On localizer -> fly runway heading
+            runway_heading
+        };
+
+        // ---------------------------------------------------------------------
+        // TURN RATE LIMITED HEADING CHANGE
+        // 3 degrees / second
+        // ---------------------------------------------------------------------
+
+        let max_turn = 3.0 * delta_time;
+
+        let heading_error = self.shortest_angle_difference(self.heading, desired_heading);
+
+        let heading_change = heading_error.clamp(-max_turn, max_turn);
+
+        self.heading = self.normalize_heading(self.heading + heading_change);
+
+        tracing::info!(
+            "{} hdg {:.1} -> {:.1} desired {:.1}",
+            self.callsign,
+            self.heading,
+            self.heading + heading_change,
+            desired_heading
+        );
     }
 
     fn update_hold_guidance(
@@ -552,11 +663,11 @@ impl Aircraft {
         if haversine_nm(self.latitude, self.longitude, fix_lat, fix_lon) < 0.5 {
             self.latitude = fix_lat;
             self.longitude = fix_lon;
-            self.heading = outbound_heading;
-            self.target_heading = outbound_heading;
+            self.heading = outbound_heading as f64;
+            self.target_heading = outbound_heading as f64;
         }
 
-        self.target_heading = (self.target_heading + 180) % 360;
+        self.target_heading = (self.target_heading + 180.0) % 360.0;
     }
 
     /// Navigate towards the next fix
@@ -597,12 +708,12 @@ impl Aircraft {
 
                 if self.current_fix_index < self.route_fixes.len() {
                     let next_fix = &self.route_fixes[self.current_fix_index];
-                    tracing::info!(
-                        "[{}] Passed {}, turning to next waypoint: {}",
-                        self.callsign,
-                        current_fix,
-                        next_fix
-                    );
+                    // tracing::info!(
+                    //     "[{}] Passed {}, turning to next waypoint: {}",
+                    //     self.callsign,
+                    //     current_fix,
+                    //     next_fix
+                    // );
                 }
                 continue;
             }
@@ -615,37 +726,37 @@ impl Aircraft {
     }
 
     /// Turn towards a target heading
-    fn turn_towards(&mut self, target: i32, delta_time: f64, turn_rate: f64) {
+    fn turn_towards(&mut self, target: f64, delta_time: f64, turn_rate: f64) {
         self.turn_towards_with_direction(target, delta_time, turn_rate, None);
     }
 
     fn turn_towards_with_direction(
         &mut self,
-        target: i32,
+        target: f64,
         delta_time: f64,
         turn_rate: f64,
         preferred_right: Option<bool>,
     ) {
-        let diff = ((target - self.heading + 540) % 360) - 180;
+        let diff: f64 = ((target - self.heading + 540.0) % 360.0) - 180.0;
 
-        if diff.abs() < 2 {
+        if diff.abs() < 2.0 {
             self.heading = target;
         } else {
             // Calculate turn amount as float first, then convert to int (fixes rounding to 0)
             let turn_amount_f = turn_rate * delta_time;
-            let turn_amount = turn_amount_f.max(1.0) as i32; // Ensure at least 1 degree per update
+            let turn_amount = turn_amount_f.max(1.0); // Ensure at least 1 degree per update
 
             match preferred_right {
                 Some(true) => {
-                    let right_diff = (target - self.heading + 360) % 360;
+                    let right_diff = (target - self.heading + 360.0) % 360.0;
                     self.heading += turn_amount.min(right_diff);
                 }
                 Some(false) => {
-                    let left_diff = (self.heading - target + 360) % 360;
+                    let left_diff = (self.heading - target + 360.0) % 360.0;
                     self.heading -= turn_amount.min(left_diff);
                 }
                 None => {
-                    if diff > 0 {
+                    if diff > 0.0 {
                         self.heading += turn_amount.min(diff);
                     } else {
                         self.heading -= turn_amount.min(diff.abs());
@@ -654,7 +765,7 @@ impl Aircraft {
             }
 
             // Normalize heading
-            self.heading = (self.heading + 360) % 360;
+            self.heading = (self.heading + 360.0) % 360.0;
         }
     }
 
@@ -685,8 +796,8 @@ impl Aircraft {
     }
 
     /// Apply a heading assignment and switch to heading mode.
-    pub fn assign_heading(&mut self, heading: i32) {
-        self.target_heading = (heading % 360 + 360) % 360;
+    pub fn assign_heading(&mut self, heading: f64) {
+        self.target_heading = (heading % 360.0 + 360.0) % 360.0;
         self.lateral_mode = LateralMode::Heading;
         self.ils_guidance = None;
         self.hold_guidance = None;
@@ -714,7 +825,7 @@ impl Aircraft {
         &mut self,
         runway: String,
         threshold: (f64, f64),
-        runway_heading: i32,
+        runway_heading: f64,
         runway_elevation_ft: i32,
     ) {
         self.ils_guidance = Some(IlsGuidance {
@@ -878,8 +989,8 @@ impl Aircraft {
         };
 
         self.lateral_mode = LateralMode::Heading;
-        self.heading = hold.outbound_heading;
-        self.target_heading = hold.outbound_heading;
+        self.heading = hold.outbound_heading as f64;
+        self.target_heading = hold.outbound_heading as f64;
         hold.active = true;
         hold.leg_elapsed = hold.leg_seconds + 1.0;
 

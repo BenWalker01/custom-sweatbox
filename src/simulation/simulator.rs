@@ -269,11 +269,11 @@ impl Simulator {
         }
 
         for message in buffered_messages {
-            if message.starts_with("$CQ") && message.contains("@94835") {
-                info!("[SIMULATOR CTRL RX] {}", message);
-            } else if message.starts_with("$HA") || message.starts_with("$HO") {
-                info!("[SIMULATOR HANDOFF RX] {}", message);
-            }
+            // if message.starts_with("$CQ") && message.contains("@94835") {
+            //     info!("[SIMULATOR CTRL RX] {}", message);
+            // } else if message.starts_with("$HA") || message.starts_with("$HO") {
+            //     info!("[SIMULATOR HANDOFF RX] {}", message);
+            // }
             self.handle_controller_message(&message).await?;
         }
 
@@ -350,10 +350,10 @@ impl Simulator {
                 if let Some(index) = self.aircraft.iter().position(|a| a.callsign == callsign) {
                     if owner.is_empty() {
                         self.aircraft[index].set_assumed_by(None);
-                        info!("[SIMULATOR] Cleared ownership marker for {}", callsign);
+                        // info!("[SIMULATOR] Cleared ownership marker for {}", callsign);
                     } else {
                         self.aircraft[index].set_assumed_by(Some(owner.to_string()));
-                        info!("[SIMULATOR] Ownership marker {} -> {}", callsign, owner);
+                        // info!("[SIMULATOR] Ownership marker {} -> {}", callsign, owner);
                     }
                 }
             }
@@ -371,10 +371,10 @@ impl Simulator {
                     .filter(|owner| self.is_ai_controller(owner))
                 {
                     if self.send_assumed_tag_marker(&owner, callsign) {
-                        info!(
-                            "[SIMULATOR] Re-marked assumed tag {} for {}",
-                            owner, callsign
-                        );
+                        // info!(
+                        //     "[SIMULATOR] Re-marked assumed tag {} for {}",
+                        //     owner, callsign
+                        // );
                     }
                 }
             }
@@ -396,7 +396,7 @@ impl Simulator {
                     }
 
                     if let Some(value) = instruction.strip_prefix('H') {
-                        if let Ok(target_heading) = value.parse::<i32>() {
+                        if let Ok(target_heading) = value.parse::<f64>() {
                             self.aircraft[index].assign_heading(target_heading);
                             info!("[SIMULATOR] {} heading {}", callsign, target_heading);
                         }
@@ -1277,8 +1277,8 @@ impl Simulator {
         );
 
         info!(
-            "[SIMULATOR] {} ILS {} {}",
-            callsign, destination, active_runway
+            "[SIMULATOR] {} ILS {} {} - coordinates {} {}, heading {}",
+            callsign, destination, active_runway, threshold_lat, threshold_lon, runway_heading
         );
         Ok(())
     }
@@ -1287,7 +1287,7 @@ impl Simulator {
         &self,
         airport: &str,
         runway: &str,
-    ) -> Result<Option<(i32, f64, f64)>> {
+    ) -> Result<Option<(f64, f64, f64)>> {
         let runway_path = format!("data/Airports/{}/Runway.txt", airport);
         let Ok(content) = std::fs::read_to_string(&runway_path) else {
             return Ok(None);
@@ -1307,25 +1307,18 @@ impl Simulator {
             let rwy_a = parts[0];
             let rwy_b = parts[1];
 
-            let heading_a = match parts[2].parse::<i32>() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let heading_b = match parts[3].parse::<i32>() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            let thrd_a = sf_coords_to_decimal(parts[4], parts[5]).unwrap();
+            let thrd_b = sf_coords_to_decimal(parts[6], parts[7]).unwrap();
+
+            let head_a = heading_from_to(thrd_a.0, thrd_a.1, thrd_b.0, thrd_b.1);
+            let head_b = heading_from_to(thrd_b.0, thrd_b.1, thrd_a.0, thrd_a.1);
 
             if runway.eq_ignore_ascii_case(rwy_a) {
-                if let Ok((lat, lon)) = sf_coords_to_decimal(parts[4], parts[5]) {
-                    return Ok(Some((heading_a, lat, lon)));
-                }
+                return Ok(Some((head_a, thrd_a.0, thrd_a.1)));
             }
 
             if runway.eq_ignore_ascii_case(rwy_b) {
-                if let Ok((lat, lon)) = sf_coords_to_decimal(parts[6], parts[7]) {
-                    return Ok(Some((heading_b, lat, lon)));
-                }
+                return Ok(Some((head_b, thrd_b.0, thrd_b.1)));
             }
         }
 
@@ -1446,7 +1439,7 @@ impl Simulator {
             self.get_cruise_altitude(route),
             runway,
             airport_coords,
-            runway_heading,
+            runway_heading as f64,
         );
 
         let resolved_owner = self
@@ -1476,7 +1469,7 @@ impl Simulator {
                     aircraft.longitude,
                     aircraft.altitude,
                     aircraft.ground_speed,
-                    aircraft.heading,
+                    aircraft.heading as i32,
                     &aircraft.squawk,
                 )
                 .await?;
@@ -1536,7 +1529,7 @@ impl Simulator {
                         aircraft.longitude,
                         aircraft.altitude,
                         aircraft.ground_speed,
-                        aircraft.heading,
+                        aircraft.heading as i32,
                         &aircraft.squawk,
                     )
                     .await
@@ -1704,7 +1697,7 @@ impl Simulator {
             (cruise_level_ft / 100).max(1),
             "00".to_string(),
             (0.0, 0.0),
-            0,
+            0.0,
         );
 
         // For arrivals/transits, route strings often end with STAR names
@@ -1827,31 +1820,33 @@ impl Simulator {
             );
         }
 
-        if !first_controller.is_empty() && self.is_controller_online(first_controller) {
-            aircraft.set_assumed_by(Some(first_controller.to_string()));
-            self.send_assumed_tag_marker(first_controller, &callsign);
-        } else {
-            let fallback_ai_owner = self.select_transit_fallback_owner(resolved_owner.as_ref());
-            if let Some(owner) = fallback_ai_owner {
-                aircraft.set_assumed_by(Some(owner.clone()));
-                self.send_assumed_tag_marker(&owner, &callsign);
-                aircraft.assign_altitude(agreed_altitude_ft);
-                if !first_controller.is_empty() {
-                    self.pending_transit_handoffs.insert(
-                        callsign.clone(),
-                        PendingTransitProfileHandoff {
-                            preferred_controller: first_controller.to_string(),
-                            handoff_fix: handoff_fix.clone(),
-                            agreed_altitude_ft: agreed_altitude_ft,
-                        },
-                    );
-                    info!(
-                        "[SIMULATOR] Transit {} fallback owner {} ({} offline), agreed {}ft at {}",
-                        callsign, owner, first_controller, agreed_altitude_ft, handoff_fix
-                    );
-                }
-            }
-        }
+        // Attempt at auto handoff logic - doesn't work... planes are not handed off by master
+
+        // if !first_controller.is_empty() && self.is_controller_online(first_controller) {
+        //     aircraft.set_assumed_by(Some(first_controller.to_string()));
+        //     self.send_assumed_tag_marker(first_controller, &callsign);
+        // } else {
+        //     let fallback_ai_owner = self.select_transit_fallback_owner(resolved_owner.as_ref());
+        //     if let Some(owner) = fallback_ai_owner {
+        //         aircraft.set_assumed_by(Some(owner.clone()));
+        //         self.send_assumed_tag_marker(&owner, &callsign);
+        //         aircraft.assign_altitude(agreed_altitude_ft);
+        //         if !first_controller.is_empty() {
+        //             self.pending_transit_handoffs.insert(
+        //                 callsign.clone(),
+        //                 PendingTransitProfileHandoff {
+        //                     preferred_controller: first_controller.to_string(),
+        //                     handoff_fix: handoff_fix.clone(),
+        //                     agreed_altitude_ft: agreed_altitude_ft,
+        //                 },
+        //             );
+        //             info!(
+        //                 "[SIMULATOR] Transit {} fallback owner {} ({} offline), agreed {}ft at {}",
+        //                 callsign, owner, first_controller, agreed_altitude_ft, handoff_fix
+        //             );
+        //         }
+        //     }
+        // }
 
         info!(
             "[SIMULATOR] Spawned transit {} ({}) {} -> {} at FL{:03} via {}",
@@ -1874,7 +1869,7 @@ impl Simulator {
                     aircraft.longitude,
                     aircraft.altitude,
                     aircraft.ground_speed,
-                    aircraft.heading,
+                    aircraft.heading as i32,
                     &aircraft.squawk,
                 )
                 .await?;
